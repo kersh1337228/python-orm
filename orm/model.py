@@ -175,6 +175,56 @@ class Model:
         except Error as err:
             print(err)
 
+    @classmethod  # Describes database table
+    def describe(cls):
+        cls.__init__(cls)
+        try:
+            with connect(
+                    host=Model.__host,
+                    user=Model.__login,
+                    password=Model.__password,
+                    database=Model.__db_name
+            ) as connection:
+                with connection.cursor(dictionary=True) as cursor:
+                    # Executing query and fetching results
+                    cursor.execute(f'DESCRIBE {cls.__name__}s')
+                    results = cursor.fetchall()
+                    # Finding the longest statement in every column
+                    cnames = ('Field name', 'Field type', 'Null', 'Key', 'Default value', 'Extra statement')
+                    maxlens = [len(str(max(results, key=lambda res: len(str(res[k])))[k])) for k in results[0].keys()]
+                    maxlens = [maxlens[i] if maxlens[i] > len(cnames[i]) else len(cnames[i]) for i in range(len(maxlens))]
+                    # Console output
+                    print(f'{cls.__name__}s table description:')
+                    print(''.join([cnames[i] + ' ' * (maxlens[i] - len(cnames[i])) + '\t\t' for i in range(len(cnames))]))
+                    for field in results:
+                        vals = list(field.values())
+                        print(''.join([
+                            (
+                                str(vals[i]) if str(vals[i]) else '-'
+                            ) + ' ' * (
+                                maxlens[i] - ((len(str(vals[i]))) if str(vals[i]) else 1)
+                            ) + '\t\t' for i in range(len(field))
+                        ]))
+        except Error as err:
+            print(err)
+
+    @classmethod  # Simply executes query given
+    def sql_query(cls, query: str):
+        cls.__init__(cls)
+        try:
+            with connect(
+                    host=Model.__host,
+                    user=Model.__login,
+                    password=Model.__password,
+                    database=Model.__db_name
+            ) as connection:
+                with connection.cursor(dictionary=True) as cursor:
+                    cursor.execute(query)
+                    results = cursor.fetchall()
+                    return results
+        except Error as err:
+            print(err)
+
     @staticmethod
     def create_m2m_table(m1, m2):
         try:
