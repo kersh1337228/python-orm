@@ -22,8 +22,8 @@ class IntField(Field):
         super().__init__(self.to_sql(default) if default else None, null, unique)
     def sql_init(self):
         return f'''int''' + super().sql_init()
-    def to_sql(self, value: int):
-        return str(value)
+    def to_sql(self, value: int | str):
+        return str(value) if isinstance(value, int) else value
     def from_sql(self, value: int):
         return value
 
@@ -34,8 +34,8 @@ class CharField(Field):
         self.size = size
     def sql_init(self):
         return f'''VARCHAR({self.size})''' + super().sql_init()
-    def to_sql(self, value: int):
-        return f'\'{value}\''
+    def to_sql(self, value: str):
+        return f'\'{value}\'' if isinstance(value, str) else value
     def from_sql(self, value: str):
         return value
 
@@ -46,7 +46,7 @@ class TextField(Field):
     def sql_init(self):
         return f'''TEXT''' + super().sql_init()
     def to_sql(self, value: int):
-        return f'\'{value}\''
+        return f'\'{value}\'' if isinstance(value, str) else value
     def from_sql(self, value: str):
         return value
 
@@ -57,7 +57,7 @@ class DateTimeField(Field):
     def sql_init(self):
         return f'''DATETIME''' + super().sql_init()
     def to_sql(self, value: datetime.datetime):
-        return f'\'{value.strftime("%Y-%m-%d %H:%M:%S")}\''
+        return f'\'{value.strftime("%Y-%m-%d %H:%M:%S")}\'' if isinstance(value, datetime.datetime) else value
     def from_sql(self, value: datetime.datetime):
         return value
 
@@ -68,7 +68,7 @@ class BooleanField(Field):
     def sql_init(self):
         return f'''bit''' + super().sql_init()
     def to_sql(self, value: bool):
-        return str(int(value))
+        return str(int(value)) if isinstance(value, bool) else value
     def from_sql(self, value: bool):
         return value
 
@@ -79,7 +79,7 @@ class JSONField(Field):
     def sql_init(self):
         return f'''JSON''' + super().sql_init()
     def to_sql(self, value: dict):
-        return f'\'{json.dumps(value)}\''
+        return f'\'{json.dumps(value)}\'' if isinstance(value, dict) else value
     def from_sql(self, value: dict):
         return value
 
@@ -90,7 +90,7 @@ class DurationField(Field):
     def sql_init(self):
         return f'''int''' + super().sql_init()
     def to_sql(self, value: datetime.timedelta):
-        return str(int(datetime.timedelta.total_seconds(value)))
+        return str(int(datetime.timedelta.total_seconds(value))) if isinstance(value, datetime.timedelta) else value
     def from_sql(self, value: int):
         return datetime.timedelta(seconds=value)
 

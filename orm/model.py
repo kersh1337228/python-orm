@@ -30,7 +30,7 @@ class Model:
     __password = '2WVGvLrB!'
     __db_name = 'pmi_cav'
 
-    def get_fields(self):
+    def get_fields(self):  # Getting model static variables aka model fields
         fields = {}
         for name in dir(self):
             try:
@@ -43,11 +43,94 @@ class Model:
          None for name, field in fields.items()]
         return fields
 
+    def __validate_field_names(self, fields: dict):  # Validating model field names
+        for name in fields.keys():
+            if '__' in name:
+                raise ModelException('Field name must not contain "__" symbol combination')
+
+    def __make_query(self, raw: dict):
+        fields = self.get_fields(self)  # Getting model template aka fields list
+        fields['id'] = f.IntField(null=False, unique=True)
+        constraints, joins = [], []  # Initializing query concatenate list
+        ops = (  # Query operations available
+            'gt', 'gte', 'lt', 'lte', 'startswith', 'istartswith', 'endswith',
+            'iendswith', 'contains', 'icontains', 'range', 'year', 'month',
+            'day', 'hour', 'minute', 'second', 'isnull', 'regex', 'in'
+        )
+        lops = {'gt': '>', 'gte': '>=', 'lt': '<', 'lte': '<='}  # Logical operations and their aliases
+        for name in raw.keys():  # Query format "<field>__<subfield_1>__...__<subfield_n>(__<operation>)=<value>"
+            subq = name.split('__')
+            if not subq[0] in fields:  # Checking if all fields specified right
+                raise ModelException(f'Wrong field "{subq[0]}" specified in query')
+            if len(subq) == 1:  # <name> = <value> simple constraint
+                constraints.append(f'{name} = {raw[name]}')
+                continue
+            else:
+                opname = subq[-1] if subq[-1] in ops else None
+                fnames = subq[:-1] if opname else subq
+                # Getting table names nested structure
+                tabs = []
+                m = self
+                for fn in fnames:
+                    tabs.append(m.table_name())
+                    try:
+                        m = getattr(m, fn).ref
+                    except AttributeError:
+                        break
+                # Listing joins based on field and table names
+                [joins.append(
+                    f" LEFT JOIN {tabs[i + 1]} ON {tabs[i]}.{fnames[i]} = {tabs[i + 1]}.id"
+                ) for i in range(len(tabs) - 1)]
+                # Appending constraint
+                value = getattr(m, fnames[-1]).to_sql(raw[name])
+                match opname:  # Adding constraint based on operation name
+                    case None:
+                        constraints.append(f'{tabs[-1]}.{fnames[-1]} = {value}')
+                    case 'gt' | 'gte' | 'lt' | 'lte':
+                        constraints.append(f'{tabs[-1]}.{fnames[-1]} {lops[opname]} {value}')
+                    case 'startswith':
+                        value = value.replace("'", '')
+                        constraints.append(f"{tabs[-1]}.{fnames[-1]} LIKE '{value}%'")
+                    case 'istartswith':
+                        value = value.replace("'", '')
+                        constraints.append(f"LOWER({tabs[-1]}.{fnames[-1]}) LIKE '{value.lower()}%'")
+                    case 'endswith':
+                        value = value.replace("'", '')
+                        constraints.append(f"{tabs[-1]}.{fnames[-1]} LIKE '%{value}'")
+                    case 'iendswith':
+                        value = value.replace("'", '')
+                        constraints.append(f"LOWER({tabs[-1]}.{fnames[-1]}) LIKE '%{value.lower()}'")
+                    case 'contains':
+                        value = value.replace("'", '')
+                        constraints.append(f"{tabs[-1]}.{fnames[-1]} LIKE '%{value}%'")
+                    case 'icontains':
+                        value = value.replace("'", '')
+                        constraints.append(f"LOWER({tabs[-1]}.{fnames[-1]}) LIKE '%{value.lower()}%'")
+                    case 'range':
+                        constraints.append(f"{tabs[-1]}.{fnames[-1]} BETWEEN {value[0]} AND {value[1]}")
+                    case 'year' | 'month' | 'day' | 'hour' | 'minute' | 'second':
+                        constraints.append(f"{opname}({tabs[-1]}.{fnames[-1]}) = {value}")
+                    case 'isnull':
+                        constraints.append(f"{opname}({tabs[-1]}.{fnames[-1]}) IS {'NOT' if not value else ''} NULL")
+                    case 'regex':
+                        constraints.append(f"{tabs[-1]}.{fnames[-1]} LIKE {value}")
+                    case 'in':
+                        constraints.append(f"{tabs[-1]}.{fnames[-1]} IN {value}")
+        # Assembling query
+        result = ''.join(joins) + ' WHERE ' + ' AND '.join(constraints)
+        return result
+
+    @classmethod
+    def table_name(cls):
+        return f'{type(cls).__name__}s' if type(cls).__name__ != 'type' else f'{cls.__name__}s'
+
     def __init__(self):  # Check if db table exists. If not creates one.
         try:  # Getting fields list either from classmethod...
             fields = self.get_fields(self)
+            self.__validate_field_names(self, fields)
         except TypeError:  # ... or from regular method
             fields = self.get_fields()
+            self.__validate_field_names(fields)
         try:
             with connect(
                     host=Model.__host,
@@ -56,8 +139,7 @@ class Model:
                     database=Model.__db_name
             ) as connection:
                 with connection.cursor() as cursor:
-                    query = f'''CREATE TABLE IF NOT EXISTS {type(self).__name__ 
-                    if type(self).__name__ != 'type' else self.__name__}s (
+                    query = f'''CREATE TABLE IF NOT EXISTS {self.table_name()} (
                     id int NOT NULL UNIQUE AUTO_INCREMENT,
                     PRIMARY KEY (id),
                     {reduce(
@@ -101,13 +183,15 @@ class Model:
         return cls.get(**kwargs)
 
     @classmethod
-    def filter(cls, **kwargs):
+    def filter(
+            cls,  # Query parameters
+            order_by: str=None,
+            limit: int=None,
+            offset: int=None,
+            **kwargs  # Query criteria
+    ):
         cls.__init__(cls)
-        fields = cls.get_fields(cls)
-        id = kwargs.pop('id', None)
-        for name in kwargs.keys():
-            if not name in fields:  # Checking if all fields specified right
-                raise ModelException('Wrong fields specified in read method')
+        q = cls.__make_query(cls, kwargs)
         try:  # Select database logs
             with connect(
                     host=Model.__host,
@@ -116,11 +200,10 @@ class Model:
                     database=Model.__db_name
             ) as connection:
                 with connection.cursor(dictionary=True) as cursor:
-                    query = f'''SELECT * FROM {cls.__name__}s WHERE
-                    {f'id = {id}' if id else ''} {reduce(
-                        lambda prev, next: prev + next[0] + ' = ' + fields[next[0]].to_sql(next[1]) + ' AND ',
-                        kwargs.items(), ''
-                    )[:-4]}'''
+                    query = f'''SELECT * FROM {cls.__name__}s {q}''' + ' ' + f'''
+                    {f' ORDER BY {order_by}' if order_by else ''}
+                    {f' LIMIT {limit}' if limit else ''}
+                    {f' OFFSET {offset}' if offset else ''}'''.strip()
                     cursor.execute(query)
                     results = cursor.fetchall()
                     return [ModelInstance(cls, **res) for res in results]
@@ -135,7 +218,7 @@ class Model:
             return None
 
     def update(self, **kwargs):
-        self.__init__()
+        self.__init__(self)
         fields = self.get_fields(self)
         id = kwargs.pop('id')
         kwargs.pop('_ModelInstance__model', None)
@@ -175,6 +258,21 @@ class Model:
         except Error as err:
             print(err)
 
+    @classmethod  # Drops model table
+    def drop(cls):
+        cls.__init__(cls)
+        try:
+            with connect(
+                    host=Model.__host,
+                    user=Model.__login,
+                    password=Model.__password,
+                    database=Model.__db_name
+            ) as connection:
+                with connection.cursor(dictionary=True) as cursor:
+                    cursor.execute(f'DROP TABLE IF EXISTS {cls.__name__}s CASCADE')
+        except Error as err:
+            print(err)
+
     @classmethod  # Describes database table
     def describe(cls):
         cls.__init__(cls)
@@ -196,7 +294,7 @@ class Model:
                     # Console output
                     print(f'{cls.__name__}s table description:')
                     print(''.join([cnames[i] + ' ' * (maxlens[i] - len(cnames[i])) + '\t\t' for i in range(len(cnames))]))
-                    for field in results:
+                    for field in results:  # Adding spaces to fill max column length
                         vals = list(field.values())
                         print(''.join([
                             (
@@ -219,7 +317,7 @@ class Model:
                     database=Model.__db_name
             ) as connection:
                 with connection.cursor(dictionary=True) as cursor:
-                    cursor.execute(query)
+                    cursor.execute(query.replace('%s', f'{cls.__name__}s'))
                     results = cursor.fetchall()
                     return results
         except Error as err:
