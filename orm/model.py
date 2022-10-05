@@ -15,14 +15,20 @@ db_data = {
 
 class ModelInstance:
     def __init__(self, model, **kwargs):
+        fields = model.get_fields(model)
+        fields['id'] = None
         for name, value in kwargs.items():
             try:
+                if not name in fields:
+                    raise KeyError(f'No model field named {name}')
                 attr = getattr(model, name)
                 setattr(self, name, attr.from_sql(value))
             except AttributeError:
                 setattr(self, name, value)
+            except KeyError:
+                continue
         self.__model = model
-        for name, value in model.get_fields(model).items():
+        for name, value in fields.items():
             if isinstance(value, f.ManyToManyField):
                 setattr(self, name, f.ManyToManyFieldInstance(value, self.id))
 
@@ -125,8 +131,10 @@ class Model:
         try:  # Select database logs
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
-                    query = f'''SELECT * FROM {cls.__name__}s{assemble_query(cls, *args, **kwargs)}'''
-                    '''FIX JOIN ALIAS'''
+                    tname = cls.table_name()
+                    query = f'''SELECT {", ".join(
+                        [f'{tname}0.id'] + [f'{tname}0.{f}' for f in cls.get_fields(cls)]
+                    )} FROM {tname} AS {tname}0{assemble_query(cls, *args, **kwargs)}'''
                     cursor.execute(query)
                     results = cursor.fetchall()
                     return [ModelInstance(cls, **res) for res in results]

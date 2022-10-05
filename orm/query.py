@@ -97,7 +97,7 @@ class Q:
             **kwargs              # Regular keyword queries
     ):
         fields = model.get_fields(model)  # Getting model template aka fields list
-        id = fields.pop('id', None)  # Extracting id not to get error
+        fields['id'] = None  # Appending id not to get error
         constraints, joins = [], []  # Initializing query concatenate list
         ops = (  # Query operations available
             'gt', 'gte', 'lt', 'lte', 'startswith', 'istartswith', 'endswith',
@@ -116,57 +116,58 @@ class Q:
                 opname = subq[-1] if subq[-1] in ops else None
                 fnames = subq[:-1] if opname else subq
                 # Getting table names nested structure
-                tabs = []
+                tabs, aliases = [], []
                 m = model
                 for fn in fnames:
-                    tabs.append(m.table_name())
+                    tbname = m.table_name()
+                    tabs.append(tbname)
+                    aliases.append(f'{tbname}{Q.join_index}')
                     try:
                         m = getattr(m, fn).ref
+                        Q.join_index += 1
                     except AttributeError:
                         break
                 # Listing joins based on field and table names
                 for i in range(len(tabs) - 1):
-                    Q.join_index += 1
                     joins.append(
-                        f" LEFT JOIN {tabs[i + 1]} AS {tabs[i + 1]}{Q.join_index} ON {tabs[i]}{Q.join_index - 1}.{fnames[i]} = {tabs[i + 1]}{Q.join_index}.id"
+                        f" LEFT JOIN {tabs[i + 1]} AS {aliases[i + 1]} ON {aliases[i] if tabs[i] != model.table_name() else model.table_name() + '0'}.{fnames[i]} = {aliases[i + 1]}.id"
                     )
                 # Appending constraint
                 value = getattr(m, fnames[-1]).to_sql(kwargs[name])
                 match opname:  # Adding constraint based on operation name
                     case None:
-                        constraints.append(f'{tabs[-1]}{Q.join_index}.{fnames[-1]} = {value}')
+                        constraints.append(f'{aliases[-1]}.{fnames[-1]} = {value}')
                     case 'gt' | 'gte' | 'lt' | 'lte':
-                        constraints.append(f'{tabs[-1]}{Q.join_index}.{fnames[-1]} {lops[opname]} {value}')
+                        constraints.append(f'{aliases[-1]}.{fnames[-1]} {lops[opname]} {value}')
                     case 'startswith':
                         value = value.replace("'", '')
-                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} LIKE '{value}%'")
+                        constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE '{value}%'")
                     case 'istartswith':
                         value = value.replace("'", '')
-                        constraints.append(f"LOWER({tabs[-1]}{Q.join_index}.{fnames[-1]}) LIKE '{value.lower()}%'")
+                        constraints.append(f"LOWER({aliases[-1]}.{fnames[-1]}) LIKE '{value.lower()}%'")
                     case 'endswith':
                         value = value.replace("'", '')
-                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} LIKE '%{value}'")
+                        constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE '%{value}'")
                     case 'iendswith':
                         value = value.replace("'", '')
-                        constraints.append(f"LOWER({tabs[-1]}{Q.join_index}.{fnames[-1]}) LIKE '%{value.lower()}'")
+                        constraints.append(f"LOWER({aliases[-1]}.{fnames[-1]}) LIKE '%{value.lower()}'")
                     case 'contains':
                         value = value.replace("'", '')
-                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} LIKE '%{value}%'")
+                        constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE '%{value}%'")
                     case 'icontains':
                         value = value.replace("'", '')
-                        constraints.append(f"LOWER({tabs[-1]}{Q.join_index}.{fnames[-1]}) LIKE '%{value.lower()}%'")
+                        constraints.append(f"LOWER({aliases[-1]}.{fnames[-1]}) LIKE '%{value.lower()}%'")
                     case 'range':
-                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} BETWEEN {value[0]} AND {value[1]}")
+                        constraints.append(f"{aliases[-1]}.{fnames[-1]} BETWEEN {value[0]} AND {value[1]}")
                     case 'year' | 'month' | 'day' | 'hour' | 'minute' | 'second':
-                        constraints.append(f"{opname}({tabs[-1]}{Q.join_index}.{fnames[-1]}) = {value}")
+                        constraints.append(f"{opname}({aliases[-1]}.{fnames[-1]}) = {value}")
                     case 'isnull':
-                        constraints.append(f"{opname}({tabs[-1]}{Q.join_index}.{fnames[-1]}) IS {'NOT' if not value else ''} NULL")
+                        constraints.append(f"{opname}({aliases[-1]}.{fnames[-1]}) IS {'NOT' if not value else ''} NULL")
                     case 'regex':
-                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} LIKE {value}")
+                        constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE {value}")
                     case 'in':
-                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} IN {value}")
+                        constraints.append(f"{aliases[-1]}.{fnames[-1]} IN {value}")
         # Assembling query
-        if id: constraints.append(f'{model.table_name()}.id = {id}')
         return {
             'joins': joins,
             'constraints': ' AND '.join(constraints)
@@ -209,7 +210,6 @@ def assemble_query(
     assembled['constraints'] = assembled['constraints']
     ass = Q.make_query(model, **kwargs)
     assembled['joins'].extend(ass['joins'])
-    assembled['joins'] = set(assembled['joins'])
     assembled['constraints'] += f"({ass['constraints']})"
     Q.join_index = 0
     return ''.join(assembled['joins']) + ' WHERE ' + assembled['constraints']
