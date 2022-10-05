@@ -4,8 +4,98 @@ from . import model as mod
 
 
 class Q:
+    '''Query logical operations wrappers'''
+    class And:
+        def __init__(self, *args):
+            self.subset = args
+
+        def __or__(self, other):
+            return Q.Or(self, other)
+
+        def __ror__(self, other):
+            return Q.Or(other, self)
+
+        def __and__(self, other):
+            self.subset.extend(other.subset)
+            return self
+
+        def __rand__(self, other):
+            other.subset.extend(self.subset)
+            return other
+
+        def __invert__(self):
+            return Q.Or([~q for q in self.subset])
+
+        def assemble_query(self, model):
+            assembled = {'joins': [], 'constraints': ''}
+            for q in self.subset:
+                ass = q.assemble_query(model)
+                assembled['joins'].extend(ass['joins'])
+                assembled['constraints'] +=  f"({ass['constraints']}) AND "
+            assembled['constraints'] = assembled['constraints'][:-5]
+            return assembled
+
+    class Or:
+        def __init__(self, *args):
+            self.subset = args
+
+        def __or__(self, other):
+            self.subset.extend(other.subset)
+            return self
+
+        def __ror__(self, other):
+            other.subset.extend(self.subset)
+            return other
+
+        def __and__(self, other):
+            return Q.And(self, other)
+
+        def __rand__(self, other):
+            return Q.And(other, self)
+
+        def __invert__(self):
+            return Q.And([~q for q in self.subset])
+
+        def assemble_query(self, model):
+            assembled = {'joins': [], 'constraints': ''}
+            for q in self.subset:
+                ass = q.assemble_query(model)
+                assembled['joins'].extend(ass['joins'])
+                assembled['constraints'] += f"({ass['constraints']}) OR "
+            assembled['constraints'] = assembled['constraints'][:-4]
+            return assembled
+
+    class Not:
+        def __init__(self, q):
+            self.query = q
+
+        def __or__(self, other):
+            return Q.Or(self, other)
+
+        def __ror__(self, other):
+            return Q.Or(other, self)
+
+        def __and__(self, other):
+            return Q.And(self, other)
+
+        def __rand__(self, other):
+            return Q.And(other, self)
+
+        def __invert__(self):
+            return Q(**self.query)
+
+        def assemble_query(self, model):
+            assembled = Q.make_query(model, **self.query)
+            assembled['constraints'] = 'NOT (' + assembled['constraints'] + ')'
+            return assembled
+
+    join_index = 0
+
     @staticmethod
-    def make_query(model, raw: dict):
+    def make_query(
+            model,                # Allows to gain access to model resources
+            **kwargs              # Regular keyword queries
+    ):
         fields = model.get_fields(model)  # Getting model template aka fields list
         id = fields.pop('id', None)  # Extracting id not to get error
         constraints, joins = [], []  # Initializing query concatenate list
@@ -15,12 +105,12 @@ class Q:
             'day', 'hour', 'minute', 'second', 'isnull', 'regex', 'in'
         )
         lops = {'gt': '>', 'gte': '>=', 'lt': '<', 'lte': '<='}  # Logical operations and their aliases
-        for name in raw.keys():  # Query format "<field>__<subfield_1>__...__<subfield_n>(__<operation>)=<value>"
+        for name in kwargs.keys():  # Query format "<field>__<subfield_1>__...__<subfield_n>(__<operation>)=<value>"
             subq = name.split('__')
             if not subq[0] in fields:  # Checking if all fields specified right
                 raise Exception(f'Wrong field "{subq[0]}" specified in query')
             if len(subq) == 1:  # <name> = <value> simple constraint
-                constraints.append(f'{name} = {raw[name]}')
+                constraints.append(f'{name} = {kwargs[name]}')
                 continue
             else:
                 opname = subq[-1] if subq[-1] in ops else None
@@ -35,79 +125,91 @@ class Q:
                     except AttributeError:
                         break
                 # Listing joins based on field and table names
-                [joins.append(
-                    f" LEFT JOIN {tabs[i + 1]} ON {tabs[i]}.{fnames[i]} = {tabs[i + 1]}.id"
-                ) for i in range(len(tabs) - 1)]
+                for i in range(len(tabs) - 1):
+                    Q.join_index += 1
+                    joins.append(
+                        f" LEFT JOIN {tabs[i + 1]} AS {tabs[i + 1]}{Q.join_index} ON {tabs[i]}{Q.join_index - 1}.{fnames[i]} = {tabs[i + 1]}{Q.join_index}.id"
+                    )
                 # Appending constraint
-                value = getattr(m, fnames[-1]).to_sql(raw[name])
+                value = getattr(m, fnames[-1]).to_sql(kwargs[name])
                 match opname:  # Adding constraint based on operation name
                     case None:
-                        constraints.append(f'{tabs[-1]}.{fnames[-1]} = {value}')
+                        constraints.append(f'{tabs[-1]}{Q.join_index}.{fnames[-1]} = {value}')
                     case 'gt' | 'gte' | 'lt' | 'lte':
-                        constraints.append(f'{tabs[-1]}.{fnames[-1]} {lops[opname]} {value}')
+                        constraints.append(f'{tabs[-1]}{Q.join_index}.{fnames[-1]} {lops[opname]} {value}')
                     case 'startswith':
                         value = value.replace("'", '')
-                        constraints.append(f"{tabs[-1]}.{fnames[-1]} LIKE '{value}%'")
+                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} LIKE '{value}%'")
                     case 'istartswith':
                         value = value.replace("'", '')
-                        constraints.append(f"LOWER({tabs[-1]}.{fnames[-1]}) LIKE '{value.lower()}%'")
+                        constraints.append(f"LOWER({tabs[-1]}{Q.join_index}.{fnames[-1]}) LIKE '{value.lower()}%'")
                     case 'endswith':
                         value = value.replace("'", '')
-                        constraints.append(f"{tabs[-1]}.{fnames[-1]} LIKE '%{value}'")
+                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} LIKE '%{value}'")
                     case 'iendswith':
                         value = value.replace("'", '')
-                        constraints.append(f"LOWER({tabs[-1]}.{fnames[-1]}) LIKE '%{value.lower()}'")
+                        constraints.append(f"LOWER({tabs[-1]}{Q.join_index}.{fnames[-1]}) LIKE '%{value.lower()}'")
                     case 'contains':
                         value = value.replace("'", '')
-                        constraints.append(f"{tabs[-1]}.{fnames[-1]} LIKE '%{value}%'")
+                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} LIKE '%{value}%'")
                     case 'icontains':
                         value = value.replace("'", '')
-                        constraints.append(f"LOWER({tabs[-1]}.{fnames[-1]}) LIKE '%{value.lower()}%'")
+                        constraints.append(f"LOWER({tabs[-1]}{Q.join_index}.{fnames[-1]}) LIKE '%{value.lower()}%'")
                     case 'range':
-                        constraints.append(f"{tabs[-1]}.{fnames[-1]} BETWEEN {value[0]} AND {value[1]}")
+                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} BETWEEN {value[0]} AND {value[1]}")
                     case 'year' | 'month' | 'day' | 'hour' | 'minute' | 'second':
-                        constraints.append(f"{opname}({tabs[-1]}.{fnames[-1]}) = {value}")
+                        constraints.append(f"{opname}({tabs[-1]}{Q.join_index}.{fnames[-1]}) = {value}")
                     case 'isnull':
-                        constraints.append(f"{opname}({tabs[-1]}.{fnames[-1]}) IS {'NOT' if not value else ''} NULL")
+                        constraints.append(f"{opname}({tabs[-1]}{Q.join_index}.{fnames[-1]}) IS {'NOT' if not value else ''} NULL")
                     case 'regex':
-                        constraints.append(f"{tabs[-1]}.{fnames[-1]} LIKE {value}")
+                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} LIKE {value}")
                     case 'in':
-                        constraints.append(f"{tabs[-1]}.{fnames[-1]} IN {value}")
+                        constraints.append(f"{tabs[-1]}{Q.join_index}.{fnames[-1]} IN {value}")
         # Assembling query
         if id: constraints.append(f'{model.table_name()}.id = {id}')
-        result = ''.join(joins) + ' WHERE ' + ' AND '.join(constraints)
-        return result
+        return {
+            'joins': joins,
+            'constraints': ' AND '.join(constraints)
+        }
 
     def __init__(self, **kwargs):
-        if len(kwargs) != 1:
-            raise Exception('Q class query must be a single keyword argument')
-        try:
-            fr = inspect.getouterframes(inspect.currentframe(), 2)[1]
-            mname = re.findall(r'([A-Z]{1}[a-z]*)\.', ''.join(fr.code_context))[0]
-            model = fr.frame.f_locals[mname]
-            if not issubclass(model, mod.Model):
-                raise IndexError
-        except IndexError:
-            raise Exception('Q class must be initialized inside of model method only')
-        self.joins, self.query = Q.make_query(model, kwargs).split('WHERE')
-        print()
+        if len(kwargs) > 1:
+            raise Exception('Q class constructor argument must be a single kwarg')
+        self.query = kwargs
 
     def __or__(self, other):
-        self.query += ' OR ' + other.query
-        return self
+        return Q.Or(self, other)
 
     def __ror__(self, other):
-        self.query += ' OR ' + other.query
-        return self
+        return Q.Or(other, self)
 
     def __and__(self, other):
-        self.query += ' AND ' + other.query
-        return self
+        return Q.And(self, other)
 
     def __rand__(self, other):
-        self.query += ' AND ' + other.query
-        return self
+        return Q.And(other, self)
 
     def __invert__(self):
-        self.query = 'NOT ' + self.query
-        return self
+        return Q.Not(self.query)
+
+    def assemble_query(self, model):
+        return Q.make_query(model, **self.query)
+
+
+def assemble_query(
+        model,  # Allows to gain access to model resources
+        *args,  # Q class queries
+        **kwargs  # Regular keyword queries
+):
+    assembled = {'joins': [], 'constraints': ''}
+    for arg in args:
+        ass = arg.assemble_query(model)
+        assembled['joins'].extend(ass['joins'])
+        assembled['constraints'] += f"({ass['constraints']}) AND "
+    assembled['constraints'] = assembled['constraints']
+    ass = Q.make_query(model, **kwargs)
+    assembled['joins'].extend(ass['joins'])
+    assembled['joins'] = set(assembled['joins'])
+    assembled['constraints'] += f"({ass['constraints']})"
+    Q.join_index = 0
+    return ''.join(assembled['joins']) + ' WHERE ' + assembled['constraints']

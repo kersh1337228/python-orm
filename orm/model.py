@@ -2,7 +2,7 @@ from mysql.connector import connect, Error
 from functools import reduce
 from .exceptions import ModelException
 from . import fields as f
-from .query import Q
+from .query import Q, assemble_query
 
 
 db_data = {
@@ -118,21 +118,15 @@ class Model:
     @classmethod
     def filter(
             cls,  # Query parameters
-            order_by: str=None,
-            limit: int=None,
-            offset: int=None,
+            *args,
             **kwargs  # Query criteria
     ):
-        assert 0
-
         cls.__check_table()
         try:  # Select database logs
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
-                    query = f'''SELECT * FROM {cls.__name__}s {Q.make_query(cls, kwargs)}''' + ' ' + f'''
-                    {f' ORDER BY {order_by}' if order_by else ''}
-                    {f' LIMIT {limit}' if limit else ''}
-                    {f' OFFSET {offset}' if offset else ''}'''.strip()
+                    query = f'''SELECT * FROM {cls.__name__}s{assemble_query(cls, *args, **kwargs)}'''
+                    '''FIX JOIN ALIAS'''
                     cursor.execute(query)
                     results = cursor.fetchall()
                     return [ModelInstance(cls, **res) for res in results]
