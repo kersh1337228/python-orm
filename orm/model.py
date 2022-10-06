@@ -1,36 +1,23 @@
 from mysql.connector import connect, Error
+from settings import db_data
 from functools import reduce
-from .exceptions import ModelException
-from . import fields as f
-from .query import Q, assemble_query
-
-
-db_data = {
-    'host': '94.228.124.234',
-    'user': 'pmi_cav',
-    'password': '2WVGvLrB!',
-    'database': 'pmi_cav'
-}
+from . import fields as fld, query as qr, containers as cont
 
 
 class ModelInstance:
     def __init__(self, model, **kwargs):
-        fields = model.get_fields(model)
-        fields['id'] = None
+        fields = model.fields
         for name, value in kwargs.items():
             try:
-                if not name in fields:
-                    raise KeyError(f'No model field named {name}')
                 attr = getattr(model, name)
                 setattr(self, name, attr.from_sql(value))
             except AttributeError:
                 setattr(self, name, value)
-            except KeyError:
-                continue
         self.__model = model
         for name, value in fields.items():
-            if isinstance(value, f.ManyToManyField):
-                setattr(self, name, f.ManyToManyFieldInstance(value, self.id))
+            if isinstance(value, fld.ManyToManyField):
+                fields[name].set_m1(model)
+                setattr(self, name, fld.ManyToManyFieldInstance(value, self.id))
 
     def save(self):
         self.__model.update(self.__model, **self.__dict__)
@@ -40,46 +27,55 @@ class ModelInstance:
 
 
 class Model:
-    def get_fields(self):  # Getting model static variables aka model fields
-        fields = {}
-        for name in dir(self):
-            try:
-                attr = getattr(self, name)
-                if issubclass(type(attr), f.Field):
-                    fields[name] = attr
-            except:
-                pass
-        [field.set_name(name) for name, field in fields.items() if isinstance(field, f.ForeignKey)]
-        return fields
-
-    def __validate_field_names(self, fields: dict):  # Validating model field names
-        for name in fields.keys():
+    def __validate_field_names(self):  # Validating model field names
+        for name in self.fields.keys():
             if '__' in name:
-                raise ModelException('Field name must not contain "__" symbol combination')
+                raise Exception('Field name must not contain "__" symbol combination')
 
     @classmethod
+    @property
     def table_name(cls):  # Returns model table name
-        return f'{type(cls).__name__}s' if type(cls).__name__ != 'type' else f'{cls.__name__}s'
+        return f'{cls.__name__}s'
 
     @classmethod
-    def __check_table(cls):
+    @property
+    def fields(cls):
+        try:
+            return cls.__fields
+        except AttributeError:
+            fields = {'id': None}
+            for name in dir(cls):
+                try:
+                    if name == 'fields':
+                        raise AttributeError
+                    attr = getattr(cls, name)
+                    if issubclass(type(attr), fld.Field):
+                        fields[name] = attr
+                except:
+                    continue
+            for name, field in fields.items():
+                if isinstance(field, fld.ForeignKey):
+                    field.set_name(name)
+            cls.__fields = fields
+            return fields
+
+    @classmethod
+    def check_table(cls):
         try:  # Check if model table exists, create if not
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute('SHOW TABLES')
                     tables = cursor.fetchall()
-                    if not (cls.table_name(),) in tables:
+                    if not (cls.table_name,) in tables:
                         cls.__init__(cls)
         except Error as err:
             print(err)
 
     def __init__(self):  # Check if db table exists. If not creates one.
-        try:  # Getting fields list either from @classmethod...
-            fields = self.get_fields(self)
-            self.__validate_field_names(self, fields)
-        except TypeError:  # ... or from regular method
-            fields = self.get_fields()
-            self.__validate_field_names(fields)
+        try:  # Validating field list either in @classmethod...
+            self.__validate_field_names(self)
+        except TypeError:  # ... or in regular method
+            self.__validate_field_names()
         try:
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
@@ -88,13 +84,13 @@ class Model:
                     PRIMARY KEY (id),
                     {reduce(
                         lambda prev, next: prev + f'{next[0]} {next[1].sql_init()}, ' 
-                        if not isinstance(next[1], f.ManyToManyField) else prev,
+                        if not isinstance(next[1], fld.ManyToManyField) else prev,
                         fields.items(), ''
                     )[:-2]})'''
                     cursor.execute(query)
         except Error as err:
             print(err)  # Creating m2m field tables and setting current model as m1
-        [(m2m.set_m1(self), m2m.create_table()) for m2m in fields.values() if isinstance(m2m, f.ManyToManyField)]
+        [(m2m.set_m1(self), m2m.create_table()) for m2m in fields.values() if isinstance(m2m, fld.ManyToManyField)]
 
     @classmethod
     def create(cls, **kwargs):
@@ -102,17 +98,17 @@ class Model:
         fields = cls.get_fields(cls)
         for name in kwargs.keys():
             if not name in fields:  # Checking if all fields specified right
-                raise ModelException('Wrong fields specified in create method')
+                raise Exception('Wrong fields specified in create method')
         try:  # Creating database log
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
                     query = f'''INSERT INTO {cls.__name__}s ({reduce(
                         lambda prev, next: prev + next + ', ' 
-                        if not isinstance(fields[next], f.ManyToManyField) else prev,
+                        if not isinstance(fields[next], fld.ManyToManyField) else prev,
                         kwargs.keys(), ''
                     )[:-2]}) VALUES ({reduce(
                         lambda prev, next: prev + fields[next[0]].to_sql(next[1]) + ', ' 
-                        if not isinstance(fields[next[0]], f.ManyToManyField) else prev,
+                        if not isinstance(fields[next[0]], fld.ManyToManyField) else prev,
                         kwargs.items(), ''
                     )[:-2]})'''
                     cursor.execute(query)
@@ -122,24 +118,8 @@ class Model:
         return cls.get(**kwargs)
 
     @classmethod
-    def filter(
-            cls,  # Query parameters
-            *args,
-            **kwargs  # Query criteria
-    ):
-        cls.__check_table()
-        try:  # Select database logs
-            with connect(**db_data) as connection:
-                with connection.cursor(dictionary=True) as cursor:
-                    tname = cls.table_name()
-                    query = f'''SELECT {", ".join(
-                        [f'{tname}0.id'] + [f'{tname}0.{f}' for f in cls.get_fields(cls)]
-                    )} FROM {tname} AS {tname}0{assemble_query(cls, *args, **kwargs)}'''
-                    cursor.execute(query)
-                    results = cursor.fetchall()
-                    return [ModelInstance(cls, **res) for res in results]
-        except Error as err:
-            print(err)
+    def filter(cls, *args, **kwargs):
+        return cont.QuerySet(cls, {'args': args, 'kwargs': kwargs})
 
     @classmethod
     def get(cls, **kwargs):
@@ -155,7 +135,7 @@ class Model:
         kwargs.pop('_ModelInstance__model', None)
         for name in kwargs.keys():
             if not name in fields:  # Checking if all fields specified right
-                raise ModelException('Wrong fields specified in update method')
+                raise Exception('Wrong fields specified in update method')
         try:  # Update database log
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:

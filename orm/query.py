@@ -4,7 +4,7 @@ from . import model as mod
 
 
 class Q:
-    '''Query logical operations wrappers'''
+    # Query logical operations wrappers
     class And:
         def __init__(self, *args):
             self.subset = args
@@ -96,7 +96,7 @@ class Q:
             model,                # Allows to gain access to model resources
             **kwargs              # Regular keyword queries
     ):
-        fields = model.get_fields(model)  # Getting model template aka fields list
+        fields = model.fields  # Getting model template aka fields list
         fields['id'] = None  # Appending id not to get error
         constraints, joins = [], []  # Initializing query concatenate list
         ops = (  # Query operations available
@@ -119,7 +119,7 @@ class Q:
                 tabs, aliases = [], []
                 m = model
                 for fn in fnames:
-                    tbname = m.table_name()
+                    tbname = m.table_name
                     tabs.append(tbname)
                     aliases.append(f'{tbname}{Q.join_index}')
                     try:
@@ -130,7 +130,7 @@ class Q:
                 # Listing joins based on field and table names
                 for i in range(len(tabs) - 1):
                     joins.append(
-                        f" LEFT JOIN {tabs[i + 1]} AS {aliases[i + 1]} ON {aliases[i] if tabs[i] != model.table_name() else model.table_name() + '0'}.{fnames[i]} = {aliases[i + 1]}.id"
+                        f" LEFT JOIN {tabs[i + 1]} AS {aliases[i + 1]} ON {aliases[i] if tabs[i] != model.table_name else model.table_name + '0'}.{fnames[i]} = {aliases[i + 1]}.id"
                     )
                 # Appending constraint
                 value = getattr(m, fnames[-1]).to_sql(kwargs[name])
@@ -202,14 +202,18 @@ def assemble_query(
         *args,  # Q class queries
         **kwargs  # Regular keyword queries
 ):
-    assembled = {'joins': [], 'constraints': ''}
+    assembled = {'joins': [], 'constraints': []}
     for arg in args:
         ass = arg.assemble_query(model)
         assembled['joins'].extend(ass['joins'])
-        assembled['constraints'] += f"({ass['constraints']}) AND "
-    assembled['constraints'] = assembled['constraints']
-    ass = Q.make_query(model, **kwargs)
-    assembled['joins'].extend(ass['joins'])
-    assembled['constraints'] += f"({ass['constraints']})"
+        assembled['constraints'].append(f"({ass['constraints']})")
+    if kwargs:
+        ass = Q.make_query(model, **kwargs)
+        assembled['joins'].extend(ass['joins'])
+        assembled['constraints'].append(f"({ass['constraints']})")
     Q.join_index = 0
-    return ''.join(assembled['joins']) + ' WHERE ' + assembled['constraints']
+    return ''.join(
+        assembled['joins']
+    ) + ' WHERE ' + ' AND '.join(
+        assembled['constraints']
+    ) if assembled['constraints'] else ''

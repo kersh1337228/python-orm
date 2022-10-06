@@ -1,26 +1,33 @@
 from mysql.connector import connect, Error
-from .exceptions import ModelException
 from . import model as m
+from .query import Q
 import datetime
 import json
+from abc import ABC, abstractmethod
 
 
-
-class Field:
+class Field(ABC):  # Basic model field class to inherit from
     def __init__(self, default=None, null: bool=True, unique: bool=False):
-        self.null = null
-        self.unique = unique
-        self.default = default
+        self.null = null        # null => {True => "", False => "NOT NULL"}
+        self.unique = unique    # unique => {True => "UNIQUE", False => ""}
+        self.default = default  # default = <value> => "DEFAULT <value>"
+        super().__init__()
 
-    def sql_init(self):
-        return f'''
-        {' UNIQUE' if self.unique else ''}
-        {' NOT NULL' if not self.null else ''}
-        {f' DEFAULT {self.default}' if self.default else ''}
-        '''
+    def sql_init(self):  # Used in CREATE query to form column description
+        return f"{' UNIQUE' if self.unique else ''}" \
+               f"{' NOT NULL' if not self.null else ''}" \
+               f"{f' DEFAULT {self.default}' if self.default else ''}"
+
+    @abstractmethod  # Used to transform python type to sql type
+    def to_sql(self, value):
+        pass
+
+    @abstractmethod  # Used to transform sql type to python type
+    def from_sql(self, value):
+        pass
 
 
-class IntField(Field):
+class IntField(Field):  # Field to store int value aka SQL INTEGER
     def __init__(self, default=None, null: bool=True, unique: bool=False):
         super().__init__(self.to_sql(default) if default else None, null, unique)
 
@@ -34,7 +41,7 @@ class IntField(Field):
         return value
 
 
-class CharField(Field):
+class CharField(Field):  # Field to store short string value aka SQL VARCHAR
     def __init__(self, default=None, size: int=255, null: bool = True, unique: bool = False):
         super().__init__(self.to_sql(default) if default else None, null, unique)
         self.size = size
@@ -49,7 +56,7 @@ class CharField(Field):
         return value
 
 
-class TextField(Field):
+class TextField(Field):  # Field to store long string value aka SQL TEXT
     def __init__(self, default=None, null: bool = True, unique: bool = False):
         super().__init__(self.to_sql(default) if default else None, null, unique)
 
@@ -63,7 +70,7 @@ class TextField(Field):
         return value
 
 
-class DateTimeField(Field):
+class DateTimeField(Field):  # Field to store datetime value aka SQL DATETIME
     def __init__(self, default=None, null: bool = True, unique: bool = False):
         super().__init__(self.to_sql(default) if default else None, null, unique)
 
@@ -77,7 +84,7 @@ class DateTimeField(Field):
         return value
 
 
-class BooleanField(Field):
+class BooleanField(Field):  # Field to store bool value aka SQL BIT
     def __init__(self, default=None, null: bool = True, unique: bool = False):
         super().__init__(self.to_sql(default) if default else None, null, unique)
 
@@ -91,7 +98,7 @@ class BooleanField(Field):
         return value
 
 
-class JSONField(Field):
+class JSONField(Field):  # Field to store dict value aka SQL JSON
     def __init__(self, default=None, null: bool = True, unique: bool = False):
         super().__init__(self.to_sql(default) if default else None, null, unique)
 
@@ -105,7 +112,7 @@ class JSONField(Field):
         return value
 
 
-class DurationField(Field):
+class DurationField(Field):  # Field to store timedelta value aka SQL INT
     def __init__(self, default=None, null: bool = True, unique: bool = False):
         super().__init__(self.to_sql(default) if default else None, null, unique)
 
@@ -119,7 +126,7 @@ class DurationField(Field):
         return datetime.timedelta(seconds=value)
 
 
-class ForeignKey(IntField):
+class ForeignKey(IntField):  # Field to link models via many-to-one relationships aka SQL FOREIGN KEY
     def __init__(self, ref, null: bool = True, unique: bool = False):
         super().__init__(None, null, unique)
         self.ref = ref
@@ -134,10 +141,10 @@ class ForeignKey(IntField):
         self.name = name
 
     def sql_init(self):
-        return super().sql_init() + f''', FOREIGN KEY ({self.name}) REFERENCES {self.ref.__name__}s (id)'''
+        return super().sql_init() + f', FOREIGN KEY ({self.name}) REFERENCES {self.ref.table_name()} (id)'
 
 
-class ManyToManyField(IntField):
+class ManyToManyField(IntField):  # Field to link models via many-to-many relationships aka SQL TABLE m1_m2
     def __init__(self, ref, null: bool = True, unique: bool = False):
         super().__init__(None, null, unique)
         self.m2 = ref
@@ -146,12 +153,13 @@ class ManyToManyField(IntField):
         try:
             with connect(**m.db_data) as connection:
                 with connection.cursor() as cursor:
-                    query = f'''CREATE TABLE IF NOT EXISTS {self.m1.__name__}_{self.m2.__name__} (
-                    {self.m1.__name__.lower()}_id int,
-                    FOREIGN KEY ({self.m1.__name__.lower()}_id) REFERENCES {self.m1.__name__}s (id),
-                    {self.m2.__name__.lower()}_id int,
-                    FOREIGN KEY ({self.m2.__name__.lower()}_id) REFERENCES {self.m2.__name__}s (id),
-                    CONSTRAINT unique_together UNIQUE ({self.m1.__name__.lower()}_id, {self.m2.__name__.lower()}_id)
+                    m1_name, m2_name = self.m1.__name__, self.m2.__name__
+                    query = f'''CREATE TABLE IF NOT EXISTS {m1_name}_{m2_name} (
+                    {m1_name.lower()}_id int,
+                    FOREIGN KEY ({m1_name.lower()}_id) REFERENCES {m1_name}s (id),
+                    {m2_name.lower()}_id int,
+                    FOREIGN KEY ({m2_name.lower()}_id) REFERENCES {m2_name}s (id),
+                    CONSTRAINT unique_together UNIQUE ({m1_name.lower()}_id, {m2_name.lower()}_id)
                     )'''
                     cursor.execute(query)
         except Error as err:
@@ -161,11 +169,12 @@ class ManyToManyField(IntField):
         try:
             with connect(**m.db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
-                    query = f'''SELECT * FROM {self.m1.__name__}_{self.m1.__name__} 
-                    WHERE {self.m1.__name__.lower()}_id = {m1_id}'''
+                    m1_name, m2_name = self.m1.__name__, self.m2.__name__
+                    query = f'SELECT * FROM {m1_name}_{m2_name} ' \
+                            f'WHERE {m1_name.lower()}_id = {m1_id}'
                     cursor.execute(query)
                     results = cursor.fetchall()
-                    return sum([self.m2.filter(id=r[f'{self.m2.__name__.lower()}_id']) for r in results], [])
+                    return self.m2.filter(Q.Or(*[Q(id=r[f'{m2_name.lower()}_id']) for r in results]))
         except Error as err:
             print(err)
 
@@ -173,8 +182,9 @@ class ManyToManyField(IntField):
         try:
             with connect(**m.db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
-                    query = f'''INSERT INTO {self.m1.__name__}_{self.m2.__name__} (
-                    {self.m1.__name__.lower()}_id, {self.m2.__name__.lower()}_id)
+                    m1_name, m2_name = self.m1.__name__, self.m2.__name__
+                    query = f'''INSERT INTO {m1_name}_{m2_name} (
+                    {m1_name.lower()}_id, {m2_name.lower()}_id)
                      VALUES ({m1_id}, {m2_id})'''
                     cursor.execute(query)
                     connection.commit()
@@ -199,7 +209,7 @@ class ManyToManyField(IntField):
         return ''
 
 
-class ManyToManyFieldInstance:
+class ManyToManyFieldInstance:  # Wrapper to work with M2M field using model instance
     def __init__(self, m2m: ManyToManyField, m1_id: int):
         self.m2m = m2m
         self.m1_id = m1_id
