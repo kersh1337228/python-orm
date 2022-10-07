@@ -31,7 +31,7 @@ class Q:
             for q in self.subset:
                 ass = q.assemble_query(model)
                 assembled['joins'].extend(ass['joins'])
-                assembled['constraints'] +=  f"({ass['constraints']}) AND "
+                assembled['constraints'] += f"({ass['constraints']}) AND "
             assembled['constraints'] = assembled['constraints'][:-5]
             return assembled
 
@@ -97,7 +97,6 @@ class Q:
             **kwargs              # Regular keyword queries
     ):
         fields = model.fields  # Getting model template aka fields list
-        fields['id'] = None  # Appending id not to get error
         constraints, joins = [], []  # Initializing query concatenate list
         ops = (  # Query operations available
             'gt', 'gte', 'lt', 'lte', 'startswith', 'istartswith', 'endswith',
@@ -110,7 +109,7 @@ class Q:
             if not subq[0] in fields:  # Checking if all fields specified right
                 raise Exception(f'Wrong field "{subq[0]}" specified in query')
             if len(subq) == 1:  # <name> = <value> simple constraint
-                constraints.append(f'{name} = {kwargs[name]}')
+                constraints.append(f'{model.table_name}0.{name} = {fields[name].to_sql(kwargs[name])}')
                 continue
             else:
                 opname = subq[-1] if subq[-1] in ops else None
@@ -119,9 +118,8 @@ class Q:
                 tabs, aliases = [], []
                 m = model
                 for fn in fnames:
-                    tbname = m.table_name
-                    tabs.append(tbname)
-                    aliases.append(f'{tbname}{Q.join_index}')
+                    tabs.append(m.table_name)
+                    aliases.append(f'{m.table_name}{Q.join_index}')
                     try:
                         m = getattr(m, fn).ref
                         Q.join_index += 1
@@ -133,40 +131,43 @@ class Q:
                         f" LEFT JOIN {tabs[i + 1]} AS {aliases[i + 1]} ON {aliases[i] if tabs[i] != model.table_name else model.table_name + '0'}.{fnames[i]} = {aliases[i + 1]}.id"
                     )
                 # Appending constraint
-                value = getattr(m, fnames[-1]).to_sql(kwargs[name])
-                match opname:  # Adding constraint based on operation name
-                    case None:
-                        constraints.append(f'{aliases[-1]}.{fnames[-1]} = {value}')
-                    case 'gt' | 'gte' | 'lt' | 'lte':
-                        constraints.append(f'{aliases[-1]}.{fnames[-1]} {lops[opname]} {value}')
-                    case 'startswith':
-                        value = value.replace("'", '')
-                        constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE '{value}%'")
-                    case 'istartswith':
-                        value = value.replace("'", '')
-                        constraints.append(f"LOWER({aliases[-1]}.{fnames[-1]}) LIKE '{value.lower()}%'")
-                    case 'endswith':
-                        value = value.replace("'", '')
-                        constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE '%{value}'")
-                    case 'iendswith':
-                        value = value.replace("'", '')
-                        constraints.append(f"LOWER({aliases[-1]}.{fnames[-1]}) LIKE '%{value.lower()}'")
-                    case 'contains':
-                        value = value.replace("'", '')
-                        constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE '%{value}%'")
-                    case 'icontains':
-                        value = value.replace("'", '')
-                        constraints.append(f"LOWER({aliases[-1]}.{fnames[-1]}) LIKE '%{value.lower()}%'")
-                    case 'range':
-                        constraints.append(f"{aliases[-1]}.{fnames[-1]} BETWEEN {value[0]} AND {value[1]}")
-                    case 'year' | 'month' | 'day' | 'hour' | 'minute' | 'second':
-                        constraints.append(f"{opname}({aliases[-1]}.{fnames[-1]}) = {value}")
-                    case 'isnull':
-                        constraints.append(f"{opname}({aliases[-1]}.{fnames[-1]}) IS {'NOT' if not value else ''} NULL")
-                    case 'regex':
-                        constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE {value}")
-                    case 'in':
-                        constraints.append(f"{aliases[-1]}.{fnames[-1]} IN {value}")
+                if hasattr(m, fnames[-1]):
+                    value = getattr(m, fnames[-1]).to_sql(kwargs[name])
+                    match opname:  # Adding constraint based on operation name
+                        case None:
+                            constraints.append(f'{aliases[-1]}.{fnames[-1]} = {value}')
+                        case 'gt' | 'gte' | 'lt' | 'lte':
+                            constraints.append(f'{aliases[-1]}.{fnames[-1]} {lops[opname]} {value}')
+                        case 'startswith':
+                            value = value.replace("'", '')
+                            constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE BINARY '{value}%'")
+                        case 'istartswith':
+                            value = value.replace("'", '')
+                            constraints.append(f"LOWER({aliases[-1]}.{fnames[-1]}) LIKE '{value.lower()}%'")
+                        case 'endswith':
+                            value = value.replace("'", '')
+                            constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE BINARY '%{value}'")
+                        case 'iendswith':
+                            value = value.replace("'", '')
+                            constraints.append(f"LOWER({aliases[-1]}.{fnames[-1]}) LIKE '%{value.lower()}'")
+                        case 'contains':
+                            value = value.replace("'", '')
+                            constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE BINARY '%{value}%'")
+                        case 'icontains':
+                            value = value.replace("'", '')
+                            constraints.append(f"LOWER({aliases[-1]}.{fnames[-1]}) LIKE '%{value.lower()}%'")
+                        case 'range':
+                            constraints.append(f"{aliases[-1]}.{fnames[-1]} BETWEEN {value[0]} AND {value[1]}")
+                        case 'year' | 'month' | 'day' | 'hour' | 'minute' | 'second':
+                            constraints.append(f"{opname}({aliases[-1]}.{fnames[-1]}) = {value}")
+                        case 'isnull':
+                            constraints.append(f"{opname}({aliases[-1]}.{fnames[-1]}) IS {'NOT' if not value else ''} NULL")
+                        case 'regex':
+                            constraints.append(f"{aliases[-1]}.{fnames[-1]} LIKE {value}")
+                        case 'in':
+                            constraints.append(f"{aliases[-1]}.{fnames[-1]} IN {value}")
+                else:
+                    raise AttributeError(f'Wrong operation name specified: "{fnames[-1]}"')
         # Assembling query
         return {
             'joins': joins,

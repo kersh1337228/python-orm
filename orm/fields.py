@@ -126,9 +126,26 @@ class DurationField(Field):  # Field to store timedelta value aka SQL INT
         return datetime.timedelta(seconds=value)
 
 
-class ForeignKey(IntField):  # Field to link models via many-to-one relationships aka SQL FOREIGN KEY
-    def __init__(self, ref, null: bool = True, unique: bool = False):
-        super().__init__(None, null, unique)
+class LinkField:  # Field to inherit from for table linking fields
+    CASCADE = 'CASCADE'
+    RESTRICT = 'RESTRICT'
+    SET_NULL = 'SET NULL'
+    SET_DEFAULT = 'SET DEFAULT'
+    NO_ACTION = 'NO ACTION'
+
+    def __init__(self, on_delete: str=RESTRICT, on_update: str=RESTRICT):
+        self.on_delete = on_delete
+        self.on_update = on_update
+
+
+class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one relationships aka SQL FOREIGN KEY
+    def __init__(
+            self, ref, null: bool = True, unique: bool = False,
+            on_delete: str=LinkField.RESTRICT,
+            on_update: str=LinkField.RESTRICT
+    ):
+        IntField.__init__(self, None, null, unique)
+        LinkField.__init__(self, on_delete, on_update)
         self.ref = ref
 
     def to_sql(self, value: int):
@@ -141,27 +158,35 @@ class ForeignKey(IntField):  # Field to link models via many-to-one relationship
         self.name = name
 
     def sql_init(self):
-        return super().sql_init() + f', FOREIGN KEY ({self.name}) REFERENCES {self.ref.table_name()} (id)'
+        return super().sql_init() + f""", FOREIGN KEY ({self.name
+        }) REFERENCES {self.ref.table_name} (id) ON DELETE {self.on_delete
+        } ON UPDATE {self.on_update}"""
 
 
-class ManyToManyField(IntField):  # Field to link models via many-to-many relationships aka SQL TABLE m1_m2
-    def __init__(self, ref, null: bool = True, unique: bool = False):
-        super().__init__(None, null, unique)
+class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-many relationships aka SQL TABLE m1_m2
+    def __init__(
+            self, ref, null: bool = True, unique: bool = False,
+            on_delete: str = '', on_update: str = ''
+    ):
+        IntField.__init__(self, None, null, unique)
+        LinkField.__init__(self, on_delete, on_update)
         self.m2 = ref
 
     def create_table(self):
-        try:
+        try:  # Creating junction table
             with connect(**m.db_data) as connection:
                 with connection.cursor() as cursor:
-                    m1_name, m2_name = self.m1.__name__, self.m2.__name__
-                    query = f'''CREATE TABLE IF NOT EXISTS {m1_name}_{m2_name} (
-                    {m1_name.lower()}_id int,
-                    FOREIGN KEY ({m1_name.lower()}_id) REFERENCES {m1_name}s (id),
-                    {m2_name.lower()}_id int,
-                    FOREIGN KEY ({m2_name.lower()}_id) REFERENCES {m2_name}s (id),
-                    CONSTRAINT unique_together UNIQUE ({m1_name.lower()}_id, {m2_name.lower()}_id)
-                    )'''
-                    cursor.execute(query)
+                    cursor.execute(f'''CREATE TABLE IF NOT EXISTS {
+                    self.m1.__name__}_{self.m2.__name__} ({
+                    self.m1.__name__.lower()}_id int,
+                    FOREIGN KEY ({self.m1.__name__.lower()}_id) REFERENCES {
+                    self.m1.table_name} (id) ON DELETE CASCADE ON UPDATE CASCADE,
+                    {self.m2.__name__.lower()}_id int,
+                    FOREIGN KEY ({self.m2.__name__.lower()}_id) REFERENCES {
+                    self.m2.table_name} (id) ON DELETE {self.on_delete} ON UPDATE {
+                    self.on_update}, CONSTRAINT unique_together UNIQUE ({
+                    self.m1.__name__.lower()}_id, {self.m2.__name__.lower()}_id)
+                    )''')
         except Error as err:
             print(err)
 
@@ -170,8 +195,8 @@ class ManyToManyField(IntField):  # Field to link models via many-to-many relati
             with connect(**m.db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
                     m1_name, m2_name = self.m1.__name__, self.m2.__name__
-                    query = f'SELECT * FROM {m1_name}_{m2_name} ' \
-                            f'WHERE {m1_name.lower()}_id = {m1_id}'
+                    query = f"""SELECT * FROM {m1_name}_{m2_name} WHERE {
+                    m1_name.lower()}_id = {m1_id}"""
                     cursor.execute(query)
                     results = cursor.fetchall()
                     return self.m2.filter(Q.Or(*[Q(id=r[f'{m2_name.lower()}_id']) for r in results]))

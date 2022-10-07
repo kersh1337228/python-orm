@@ -19,11 +19,35 @@ class ModelInstance:
                 fields[name].set_m1(model)
                 setattr(self, name, fld.ManyToManyFieldInstance(value, self.id))
 
-    def save(self):
-        self.__model.update(self.__model, **self.__dict__)
+    def save(self):  # Saves changes manually appended to model instance via <model>.<field> = <value>
+        self.__model.check_table()
+        try:  # UPDATE command
+            with connect(**db_data) as connection:
+                with connection.cursor(dictionary=True) as cursor:
+                    cursor.execute(
+                        f"""UPDATE {self.__model.table_name} SET {', '.join([
+                        f'''{self.__model.table_name}.{name} = {
+                        self.__model.fields[name].to_sql(val)}'''
+                        for name, val in self.__model.fields.items() 
+                        if name != 'id'
+                        ])} WHERE {self.__model.table_name}.id = {self.id}"""
+                    )
+                    connection.commit()
+        except Error as err:
+            print(err)
 
-    def delete(self):
-        self.__model.delete(self.__model, self.id)
+    def delete(self):  # Deletes model instance row by id
+        self.__model.check_table()
+        try:  # DELETE command
+            with connect(**db_data) as connection:
+                with connection.cursor(dictionary=True) as cursor:
+                    cursor.execute(
+                        f"""DELETE FROM {self.__model.table_name
+                        } WHERE id = {self.id}"""
+                    )
+                    connection.commit()
+        except Error as err:
+            print(err)
 
 
 class Model:
@@ -43,7 +67,7 @@ class Model:
         try:
             return cls.__fields
         except AttributeError:
-            fields = {'id': None}
+            fields = {'id': fld.IntField(null=False, unique=True)}
             for name in dir(cls):
                 try:
                     if name == 'fields':
@@ -89,33 +113,32 @@ class Model:
                     )[:-2]})'''
                     cursor.execute(query)
         except Error as err:
-            print(err)  # Creating m2m field tables and setting current model as m1
-        [(m2m.set_m1(self), m2m.create_table()) for m2m in fields.values() if isinstance(m2m, fld.ManyToManyField)]
+            print(err)
+        [   # Creating m2m field tables and setting current model as m1
+            (m2m.set_m1(self), m2m.create_table())
+            for m2m in fields.values()
+            if isinstance(m2m, fld.ManyToManyField)
+        ]
 
     @classmethod
-    def create(cls, **kwargs):
-        cls.__check_table()
-        fields = cls.get_fields(cls)
-        for name in kwargs.keys():
-            if not name in fields:  # Checking if all fields specified right
+    def create(cls, **kwargs):  # Creating new row in table
+        cls.check_table()
+        vals = []  # Placeholder for SQL-friendly fields values
+        for name, val in kwargs.items():
+            if not name in cls.fields:  # Checking if all fields specified right
                 raise Exception('Wrong fields specified in create method')
+            else:  # Converting fields value to SQL-friendly form
+                vals.append(cls.fields[name].to_sql(val))
         try:  # Creating database log
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
-                    query = f'''INSERT INTO {cls.__name__}s ({reduce(
-                        lambda prev, next: prev + next + ', ' 
-                        if not isinstance(fields[next], fld.ManyToManyField) else prev,
-                        kwargs.keys(), ''
-                    )[:-2]}) VALUES ({reduce(
-                        lambda prev, next: prev + fields[next[0]].to_sql(next[1]) + ', ' 
-                        if not isinstance(fields[next[0]], fld.ManyToManyField) else prev,
-                        kwargs.items(), ''
-                    )[:-2]})'''
-                    cursor.execute(query)
+                    cursor.execute(f'''INSERT INTO {cls.table_name} ({', '.join(
+                        kwargs.keys()
+                    )}) VALUES ({', '.join(vals)})''')
                     connection.commit()
         except Error as err:
             print(err)
-        return cls.get(**kwargs)
+        return ModelInstance(cls, **kwargs)
 
     @classmethod
     def filter(cls, *args, **kwargs):
@@ -127,37 +150,6 @@ class Model:
             return cls.filter(**kwargs)[0]
         except IndexError:
             return None
-
-    def update(self, **kwargs):
-        self.__check_table()
-        fields = self.get_fields(self)
-        id = kwargs.pop('id')
-        kwargs.pop('_ModelInstance__model', None)
-        for name in kwargs.keys():
-            if not name in fields:  # Checking if all fields specified right
-                raise Exception('Wrong fields specified in update method')
-        try:  # Update database log
-            with connect(**db_data) as connection:
-                with connection.cursor() as cursor:
-                    query = f'''UPDATE {self.__name__}s SET {reduce(
-                        lambda prev, next: prev + next[0] + ' = ' + fields[next[0]].to_sql(next[1]) + ', ',
-                        kwargs.items(), ''
-                    )[:-2]} WHERE id = {id}'''
-                    cursor.execute(query)
-                    connection.commit()
-        except Error as err:
-            print(err)
-
-    def delete(self, id: int):
-        self.__check_table()
-        try:  # Delete database log
-            with connect(**db_data) as connection:
-                with connection.cursor() as cursor:
-                    query = f'''DELETE FROM {self.__name__}s WHERE id = {id}'''
-                    cursor.execute(query)
-                    connection.commit()
-        except Error as err:
-            print(err)
 
     @classmethod  # Drops database table associated with model
     def drop(cls):

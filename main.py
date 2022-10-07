@@ -5,7 +5,5 @@ from orm.query import Q
 
 
 if __name__ == '__main__':
-    rs = Route.filter(
-        Q(plane__airline__country__in=('Belarus', 'Austria'))
-    ).filter(arrival_point__capacity__lte=900)
-    rs.update(plane=Plane.get(id=5))
+    rs = Airport.filter(Q(capacity__lte=900), city__startswith='M') * Airport.filter(Q(capacity__lte=500) | Q(capacity__gte=50))
+    pass
