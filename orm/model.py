@@ -126,19 +126,52 @@ class Model:
         vals = []  # Placeholder for SQL-friendly fields values
         for name, val in kwargs.items():
             if not name in cls.fields:  # Checking if all fields specified right
-                raise Exception('Wrong fields specified in create method')
+                raise Exception(f'Wrong field specified in create method: "{name}"')
             else:  # Converting fields value to SQL-friendly form
                 vals.append(cls.fields[name].to_sql(val))
         try:  # Creating database log
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
-                    cursor.execute(f'''INSERT INTO {cls.table_name} ({', '.join(
-                        kwargs.keys()
-                    )}) VALUES ({', '.join(vals)})''')
+                    cursor.execute(
+                        f'''INSERT INTO {cls.table_name} ({', '.join(
+                            kwargs.keys()
+                        )}) VALUES ({', '.join(vals)})'''
+                    )
                     connection.commit()
         except Error as err:
             print(err)
         return ModelInstance(cls, **kwargs)
+
+    @classmethod
+    def bulk_create(cls, *args):  # Creating new rows in table
+        # Performing necessary data correctness checks
+        if not all(map(lambda a: isinstance(a, dict), args)):
+            raise TypeError('Wrong arguments type for bulk_create: expected dict.')
+        if not all(map(lambda a: a.keys() == args[0].keys(), args[1:])):
+            raise TypeError('All init dicts must have the same set of attributes.')
+        cls.check_table()
+        vals = []  # Placeholder for SQL-friendly field values sets
+        for arg in args:
+            vals.append([])
+            for name, val in arg.items():
+                if not name in cls.fields:  # Checking if all fields specified right
+                    raise Exception(f'Wrong field specified in bulk_create method: "{name}"')
+                else:  # Converting fields value to SQL-friendly form
+                    vals[-1].append(cls.fields[name].to_sql(val))
+            vals[-1] = f"({', '.join(vals[-1])})"
+        try:  # Creating database log
+            with connect(**db_data) as connection:
+                with connection.cursor() as cursor:
+                    cursor.execute(
+                        f'''INSERT INTO {cls.table_name} ({', '.join(
+                            args[0].keys()
+                        )}) VALUES {', '.join(vals)}'''
+                    )
+                    connection.commit()
+        except Error as err:
+            print(err)
+        # SPECIFY RETURN FOR CREATE AND BULK CREATE
+        # return cls.filter(qr.Q.Or(*(qr.Q())))
 
     @classmethod
     def filter(cls, *args, **kwargs):

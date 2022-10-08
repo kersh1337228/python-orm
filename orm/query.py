@@ -1,11 +1,38 @@
 import inspect
 import re
 from . import model as mod
+from abc import ABC, abstractmethod
 
 
-class Q:
+class BaseOperation(ABC):  # Database operation interface
+    @abstractmethod  # Assembling inner Q, Not, And, Or objects into SQL string
+    def assemble_query(self, model):
+        pass
+
+    @abstractmethod  # Logical OR operation
+    def __or__(self, other):
+        pass
+
+    @abstractmethod
+    def __ror__(self, other):
+        pass
+
+    @abstractmethod  # Logical AND operation
+    def __and__(self, other):
+        pass
+
+    @abstractmethod
+    def __rand__(self, other):
+        pass
+
+    @abstractmethod  # Logical NOT operation
+    def __invert__(self):
+        pass
+
+
+class Q(BaseOperation):  # Query class to add more complex constraints like AND, OR, NOT
     # Query logical operations wrappers
-    class And:
+    class And(BaseOperation):  # Logical AND wrapper
         def __init__(self, *args):
             self.subset = args
 
@@ -27,15 +54,15 @@ class Q:
             return Q.Or([~q for q in self.subset])
 
         def assemble_query(self, model):
-            assembled = {'joins': [], 'constraints': ''}
+            assembled = {'joins': [], 'constraints': []}
             for q in self.subset:
                 ass = q.assemble_query(model)
                 assembled['joins'].extend(ass['joins'])
-                assembled['constraints'] += f"({ass['constraints']}) AND "
-            assembled['constraints'] = assembled['constraints'][:-5]
+                assembled['constraints'].append(f"({ass['constraints']})")
+            assembled['constraints'] = ' AND '.join(assembled['constraints'])
             return assembled
 
-    class Or:
+    class Or(BaseOperation):  # Logical OR wrapper
         def __init__(self, *args):
             self.subset = args
 
@@ -65,7 +92,7 @@ class Q:
             assembled['constraints'] = assembled['constraints'][:-4]
             return assembled
 
-    class Not:
+    class Not(BaseOperation):  # Logical NOT wrapper
         def __init__(self, q):
             self.query = q
 

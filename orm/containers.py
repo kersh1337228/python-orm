@@ -49,6 +49,7 @@ class QuerySet:
     def __init__(self, model, query):
         self.__model = model
         self.__query = query
+        self.__union = []
         self.__executed = False
         self.__container = tuple()
 
@@ -58,20 +59,23 @@ class QuerySet:
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
                     cursor.execute(
-                        f"""SELECT {', '.join(
-                            f'{self.__model.table_name}0.{fname}'
-                            for fname, fval in
-                            self.__model.fields.items()
-                            if not isinstance(fval, fld.ManyToManyField)
-                        )} FROM {self.__model.table_name} AS {
-                        self.__model.table_name}0{qr.assemble_query(
-                            self.__model,
-                            *self.__query['args'],
-                            **self.__query['kwargs']
-                        )}{f' LIMIT {self.__query["limit"]}' 
-                        if self.__query.get("limit", None) else ''}{
-                        f' OFFSET {self.__query["offset"]}'
-                        if self.__query.get("offset", None) else ''}"""
+                        ' UNION '.join(
+                            f"""SELECT {', '.join(
+                                f'{self.__model.table_name}0.{fname}'
+                                for fname, fval in
+                                self.__model.fields.items()
+                                if not isinstance(fval, fld.ManyToManyField)
+                            )} FROM {self.__model.table_name} AS {
+                            self.__model.table_name}0{qr.assemble_query(
+                                self.__model,
+                                *q['args'],
+                                **q['kwargs']
+                            )}{f' LIMIT {self.__query["limit"]}'
+                            if self.__query.get("limit", None) else ''}{
+                            f' OFFSET {self.__query["offset"]}'
+                            if self.__query.get("offset", None) else ''}"""
+                            for q in [self.__query] + self.__union
+                        )
                     )
                     results = cursor.fetchall()
                     self.__container = tuple(
@@ -88,9 +92,15 @@ class QuerySet:
 
     def __getitem__(self, key: int | slice):
         if isinstance(key, int):
-            if not self.__executed:
+            if key < 0:
+                if not self.__executed:
+                    self.__exec()
+                return self.__container[key]
+            else:
+                self.__query['offset'] = key
+                self.__query['limit'] = 1
                 self.__exec()
-            return self.__container[key]
+                return self.__container[0]
         elif isinstance(key, slice):
             if not self.__executed:
                 if key.start and key.stop and key.start >= 0 and key.stop > key.start:
@@ -104,8 +114,7 @@ class QuerySet:
                             self.__query['limit'] = stop - start
                     return QuerySet.__QuerySetSlice(self)
                 else:
-                    if not self.__executed:
-                        self.__exec()
+                    self.__exec()
                     return self.__container[key]
             else:
                 return self.__container[key]
@@ -234,9 +243,21 @@ class QuerySet:
         else:
             return bool(self.__container)
 
-    def __add__(self, other):  # Queries concatenation aka OR
+    def __bool__(self):
+        return self.exists()
+
+    def __add__(self, other):  # Queries concatenation aka UNION
         if self.__model.__name__ != other.__model.__name__:
-            raise TypeError('QuerySet models must be the same to perform concatenation')
+            raise TypeError('QuerySet models must be the same to perform UNION operation')
+        self.__union.append(other.__query)
+        return self
+
+    def __radd__(self, other):
+        return self.__add__(other)
+
+    def __or__(self, other):
+        if self.__model.__name__ != other.__model.__name__:
+            raise TypeError('QuerySet models must be the same to perform OR operation')
         else:
             return QuerySet(self.__model, {
                 'args': qr.Q.Or(
@@ -252,18 +273,12 @@ class QuerySet:
                 'kwargs': {}
             })
 
-    def __radd__(self, other):
-        return self.__add__(other)
-
-    def __or__(self, other):
-        return self.__add__(other)
-
     def __ror__(self, other):
-        return self.__add__(other)
+        return self.__or__(other)
 
-    def __mul__(self, other):  # Queries multiplication aka AND
+    def __and__(self, other):
         if self.__model.__name__ != other.__model.__name__:
-            raise TypeError('QuerySet models must be the same to perform concatenation')
+            raise TypeError('QuerySet models must be the same to perform AND operation')
         else:
             self.__query['kwargs'].update(other.__query['kwargs'])
             return QuerySet(self.__model, {
@@ -271,11 +286,5 @@ class QuerySet:
                 'kwargs': self.__query['kwargs']
             })
 
-    def __rmul__(self, other):
-        return self.__mul__(other)
-
-    def __and__(self, other):
-        return self.__mul__(other)
-
     def __rand__(self, other):
-        return self.__mul__(other)
+        return self.__and__(other)
