@@ -119,7 +119,42 @@ class QuerySet:
             else:
                 return self.__container[key]
         else:
-            raise TypeError('QuerySet __getitem__() method supports only int and slice argument types')
+            raise TypeError('QuerySet __getitem__() method supports only int and slice argument types.')
+
+    def __contains__(self, item):
+        if not issubclass(type(item), mdl.ModelInstance):
+            raise TypeError('QuerySet object can only store model instances.')
+        elif item.model.__name__ != self.__model.__name__:
+            raise TypeError(
+                f'''Wrong model for this QuerySet: expected "{
+                self.__model.__name__}" but got "{item.model.__name__}".'''
+            )
+        else:
+            if not self.__executed:
+                self.__model.check_table()
+                try:  # SELECT EXISTS command with INNER JOIN
+                    with connect(**db_data) as connection:
+                        with connection.cursor() as cursor:
+                            cursor.execute(
+                                f"""SELECT EXISTS(SELECT * FROM {
+                                self.__model.table_name} AS {self.__model.table_name
+                                }0 INNER JOIN {self.__model.table_name} AS intersect ON {
+                                self.__model.table_name}0.id = intersect.id{
+                                qr.assemble_query(
+                                    self.__model,
+                                    *self.__query['args'],
+                                    **self.__query['kwargs']
+                                )} AND intersect.id = {item.id}{f' LIMIT {self.__query["limit"]}'
+                                if self.__query.get("limit", None) else ''}{
+                                f' OFFSET {self.__query["offset"]}'
+                                if self.__query.get("offset", None) else ''})"""
+                            )
+                            results = cursor.fetchall()
+                            return bool(results[0][0])
+                except Error as err:
+                    print(err)
+            else:
+                return item in self.__container
 
     def __str__(self) -> str:
         if not self.__executed:
@@ -153,11 +188,19 @@ class QuerySet:
             return len(self.__container)
 
     def filter(self, *args, **kwargs):
+        self.__executed = False
         self.__query['args'] += args
         self.__query['kwargs'].update(kwargs)
         return self
 
+    def get(self, *args, **kwargs):
+        try:  # Returns model instance matching query...
+            return self.filter(*args, **kwargs)[0]
+        except IndexError:  # ... or None if nothing was found
+            return None
+
     def exclude(self, *args, **kwargs):
+        self.__executed = False
         self.__query['args'] += (~qr.Q.And(
             *(args + [qr.Q(**{name: val}) for name, val in kwargs.items()])
         ),)
@@ -176,21 +219,22 @@ class QuerySet:
         try:  # UPDATE command
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
-                    query = f"""UPDATE {self.__model.table_name}, (SELECT {
-                    self.__model.table_name}0.id FROM {
-                    self.__model.table_name} AS {self.__model.table_name}0{
-                    qr.assemble_query(
-                        self.__model,
-                        *self.__query['args'],
-                        **self.__query['kwargs']
-                    )}{f' LIMIT {self.__query["limit"]}' 
-                    if self.__query.get("limit", None) else ''}{
-                    f' OFFSET {self.__query["offset"]}'
-                    if self.__query.get("offset", None) else ''
-                    }) AS __tab SET {', '.join(
-                        update_set
-                    )} WHERE {self.__model.table_name}.id = __tab.id"""
-                    cursor.execute(query)
+                    cursor.execute(
+                        f"""UPDATE {self.__model.table_name}, (SELECT {
+                        self.__model.table_name}0.id FROM {
+                        self.__model.table_name} AS {self.__model.table_name}0{
+                        qr.assemble_query(
+                            self.__model,
+                            *self.__query['args'],
+                            **self.__query['kwargs']
+                        )}{f' LIMIT {self.__query["limit"]}'
+                        if self.__query.get("limit", None) else ''}{
+                        f' OFFSET {self.__query["offset"]}'
+                        if self.__query.get("offset", None) else ''
+                        }) AS __tab SET {', '.join(
+                            update_set
+                        )} WHERE {self.__model.table_name}.id = __tab.id"""
+                    )
                     connection.commit()
         except Error as err:
             print(err)
@@ -200,19 +244,20 @@ class QuerySet:
         try:  # DELETE command
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
-                    query = f"""DELETE FROM {self.__model.table_name} WHERE {
-                    self.__model.table_name}.id IN (SELECT {
-                    self.__model.table_name}0.id FROM (SELECT * FROM {
-                    self.__model.table_name}) AS {self.__model.table_name}0{
-                    qr.assemble_query(
-                        self.__model,
-                        *self.__query['args'],
-                        **self.__query['kwargs']
-                    )}{f' LIMIT {self.__query["limit"]}' 
-                    if self.__query.get("limit", None) else ''}{
-                    f' OFFSET {self.__query["offset"]}'
-                    if self.__query.get("offset", None) else ''})"""
-                    cursor.execute(query)
+                    cursor.execute(
+                        f"""DELETE FROM {self.__model.table_name} WHERE {
+                        self.__model.table_name}.id IN (SELECT {
+                        self.__model.table_name}0.id FROM (SELECT * FROM {
+                        self.__model.table_name}) AS {self.__model.table_name}0{
+                        qr.assemble_query(
+                            self.__model,
+                            *self.__query['args'],
+                            **self.__query['kwargs']
+                        )}{f' LIMIT {self.__query["limit"]}'
+                        if self.__query.get("limit", None) else ''}{
+                        f' OFFSET {self.__query["offset"]}'
+                        if self.__query.get("offset", None) else ''})"""
+                    )
                     connection.commit()
         except Error as err:
             print(err)
@@ -223,7 +268,8 @@ class QuerySet:
             try:  # SELECT EXISTS command
                 with connect(**db_data) as connection:
                     with connection.cursor() as cursor:
-                        query =  f"""SELECT EXISTS(SELECT * FROM {
+                        cursor.execute(
+                            f"""SELECT EXISTS(SELECT * FROM {
                             self.__model.table_name} AS {self.__model.table_name
                             }0{qr.assemble_query(
                                 self.__model,
@@ -233,8 +279,6 @@ class QuerySet:
                             if self.__query.get("limit", None) else ''}{
                             f' OFFSET {self.__query["offset"]}'
                             if self.__query.get("offset", None) else ''})"""
-                        cursor.execute(
-                           query
                         )
                         results = cursor.fetchall()
                         return bool(results[0][0])
@@ -249,8 +293,10 @@ class QuerySet:
     def __add__(self, other):  # Queries concatenation aka UNION
         if self.__model.__name__ != other.__model.__name__:
             raise TypeError('QuerySet models must be the same to perform UNION operation')
-        self.__union.append(other.__query)
-        return self
+        else:
+            self.__executed = False
+            self.__union.append(other.__query)
+            return self
 
     def __radd__(self, other):
         return self.__add__(other)
@@ -259,6 +305,7 @@ class QuerySet:
         if self.__model.__name__ != other.__model.__name__:
             raise TypeError('QuerySet models must be the same to perform OR operation')
         else:
+            self.__executed = False
             return QuerySet(self.__model, {
                 'args': qr.Q.Or(
                     qr.Q.And(*(self.__query['args'] + tuple(
@@ -280,6 +327,7 @@ class QuerySet:
         if self.__model.__name__ != other.__model.__name__:
             raise TypeError('QuerySet models must be the same to perform AND operation')
         else:
+            self.__executed = False
             self.__query['kwargs'].update(other.__query['kwargs'])
             return QuerySet(self.__model, {
                 'args': self.__query['args'] + other.__query['args'],

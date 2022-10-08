@@ -6,18 +6,17 @@ class Airport(model.Model):
     code = fields.CharField(null=False, unique=True)
     city = fields.CharField(null=False)
     country = fields.CharField(null=False)
-    capacity = fields.IntField(null=False)
-
-
-class Airline(model.Model):
-    name = fields.CharField(null=False, unique=True)
-    country = fields.CharField(null=False)
 
 
 class Plane(model.Model):
     name = fields.CharField(null=False, unique=True)
     capacity = fields.JSONField(null=False)
-    airline = fields.ForeignKey(ref=Airline, null=False)
+
+
+class Airline(model.Model):
+    name = fields.CharField(null=False, unique=True)
+    country = fields.CharField(null=False)
+    planes = fields.ManyToManyField(ref=Plane)
 
 
 class Route(model.Model):

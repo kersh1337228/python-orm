@@ -4,20 +4,29 @@ from functools import reduce
 from . import fields as fld, query as qr, containers as cont
 
 
-class ModelInstance:
+class ModelInstance:  # Model wrapper class to restrict access to Model class fields and methods
     def __init__(self, model, **kwargs):
         fields = model.fields
-        for name, value in kwargs.items():
+        for name, value in kwargs.items():  # Initializing all fields as class attributes
             try:
                 attr = getattr(model, name)
                 setattr(self, name, attr.from_sql(value))
             except AttributeError:
                 setattr(self, name, value)
         self.__model = model
-        for name, value in fields.items():
+        for name, value in fields.items():  # Initializing m2m fields as ManyToManyFieldInstance wrappers
             if isinstance(value, fld.ManyToManyField):
-                fields[name].set_m1(model)
-                setattr(self, name, fld.ManyToManyFieldInstance(value, self.id))
+                fields[name].m1 = model
+                setattr(
+                    self, name,
+                    fld.ManyToManyFieldInstance(
+                        fields[name], self.id
+                    )
+                )
+
+    @property
+    def model (self):
+        return self.__model
 
     def save(self):  # Saves changes manually appended to model instance via <model>.<field> = <value>
         self.__model.check_table()
@@ -53,8 +62,16 @@ class ModelInstance:
 class Model:
     def __validate_field_names(self):  # Validating model field names
         for name in self.fields.keys():
-            if '__' in name:
-                raise Exception('Field name must not contain "__" symbol combination')
+            if '__' in name:  # Special query kwargs delimiter
+                raise AttributeError(
+                    f'Field name must not contain "__" symbol combination:'
+                    f' "{name}".'
+                )
+            if name == 'id':  # Reserved name
+                raise AttributeError(
+                    f'You can not name your model field "id". '
+                    f'This field name is reserved.'
+                )
 
     @classmethod
     @property
@@ -64,7 +81,7 @@ class Model:
     @classmethod
     @property
     def fields(cls):
-        try:
+        try:  # Return dict with model field names and Field-class types
             return cls.__fields
         except AttributeError:
             fields = {'id': fld.IntField(null=False, unique=True)}
@@ -100,25 +117,23 @@ class Model:
             self.__validate_field_names(self)
         except TypeError:  # ... or in regular method
             self.__validate_field_names()
+        inits = []
+        for name, value in fields.items():
+            if not isinstance(value, fld.ManyToManyField):  # If not m2m field then is in table
+                inits.append(f'{name} {value.sql_init()}')
+            else:  # If m2m field then
+                value.m1 = self  # Setting m1 model as current one
+                value.create()  # And creating necessary joint table
         try:
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
-                    query = f'''CREATE TABLE IF NOT EXISTS {self.table_name()} (
-                    id int NOT NULL UNIQUE AUTO_INCREMENT,
-                    PRIMARY KEY (id),
-                    {reduce(
-                        lambda prev, next: prev + f'{next[0]} {next[1].sql_init()}, ' 
-                        if not isinstance(next[1], fld.ManyToManyField) else prev,
-                        fields.items(), ''
-                    )[:-2]})'''
-                    cursor.execute(query)
+                    cursor.execute(
+                        f'''CREATE TABLE IF NOT EXISTS {self.table_name
+                        } (id int NOT NULL UNIQUE AUTO_INCREMENT, PRIMARY KEY (id),
+                        {', '.join(inits)})'''
+                    )
         except Error as err:
             print(err)
-        [   # Creating m2m field tables and setting current model as m1
-            (m2m.set_m1(self), m2m.create_table())
-            for m2m in fields.values()
-            if isinstance(m2m, fld.ManyToManyField)
-        ]
 
     @classmethod
     def create(cls, **kwargs):  # Creating new row in table
@@ -140,7 +155,7 @@ class Model:
                     connection.commit()
         except Error as err:
             print(err)
-        return ModelInstance(cls, **kwargs)
+        return cls.get(**kwargs)
 
     @classmethod
     def bulk_create(cls, *args):  # Creating new rows in table
@@ -170,24 +185,29 @@ class Model:
                     connection.commit()
         except Error as err:
             print(err)
-        # SPECIFY RETURN FOR CREATE AND BULK CREATE
-        # return cls.filter(qr.Q.Or(*(qr.Q())))
+        return cls.filter(
+            qr.Q.Or(
+                *(qr.Q.And(
+                    *(qr.Q(**{name: value}) for name, value in kwargs.items())
+                ) for kwargs in args)
+            )
+        )
 
     @classmethod
-    def filter(cls, *args, **kwargs):
+    def filter(cls, *args, **kwargs):  # Returns QuerySet of model instances matching query
         return cont.QuerySet(cls, {'args': args, 'kwargs': kwargs})
 
     @classmethod
-    def get(cls, **kwargs):
-        try:
-            return cls.filter(**kwargs)[0]
-        except IndexError:
+    def get(cls, *args, **kwargs):
+        try:  # Returns model instance matching query...
+            return cls.filter(*args, **kwargs)[0]
+        except IndexError:  # ... or None if nothing was found
             return None
 
     @classmethod  # Drops database table associated with model
     def drop(cls):
         cls.__check_table()
-        try:
+        try:  # DROP TABLE SQL command
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
                     cursor.execute(f'DROP TABLE IF EXISTS {cls.__name__}s CASCADE')
@@ -197,11 +217,11 @@ class Model:
     @classmethod  # Describes database table
     def describe(cls):
         cls.__check_table()
-        try:
+        try:  # DESCRIBE SQL command
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
                     # Executing query and fetching results
-                    cursor.execute(f'DESCRIBE {cls.__name__}s')
+                    cursor.execute(f'DESCRIBE {cls.table_name}')
                     results = cursor.fetchall()
                     # Finding the longest statement in every column
                     cnames = ('Field name', 'Field type', 'Null', 'Key', 'Default value', 'Extra statement')

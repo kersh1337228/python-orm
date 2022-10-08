@@ -1,22 +1,47 @@
 from mysql.connector import connect, Error
-from . import model as m
-from .query import Q
+from settings import db_data
+from . import model as mdl, query as qr, containers as cont
 import datetime
 import json
+from itertools import chain
 from abc import ABC, abstractmethod
 
 
 class Field(ABC):  # Basic model field class to inherit from
-    def __init__(self, default=None, null: bool=True, unique: bool=False):
-        self.null = null        # null => {True => "", False => "NOT NULL"}
-        self.unique = unique    # unique => {True => "UNIQUE", False => ""}
-        self.default = default  # default = <value> => "DEFAULT <value>"
+    def __init__(
+            self, dtype: type,
+            default=None,
+            null: bool=True,
+            unique: bool=False,
+            choices: tuple=()
+    ):
+        if not isinstance(choices, tuple):
+            raise TypeError(
+                f'Wrong Field choices parameter value:'
+                f' expected "tuple" but got "{type(choices).__name__}"'
+            )
+        if not all(map(lambda c: type(c) == dtype, choices)):
+            raise TypeError(
+                f'{type(self).__name__} choices parameter must contain only {dtype} values'
+            )
+        self._choices = choices  # choices parameter restricts set of values attribute can take
+        self._null = null        # null => {True => "", False => "NOT NULL"}
+        self._unique = unique    # unique => {True => "UNIQUE", False => ""}
+        self._default = default  # default = <value> => "DEFAULT <value>"
         super().__init__()
 
     def sql_init(self):  # Used in CREATE query to form column description
-        return f"{' UNIQUE' if self.unique else ''}" \
-               f"{' NOT NULL' if not self.null else ''}" \
-               f"{f' DEFAULT {self.default}' if self.default else ''}"
+        return f"{' UNIQUE' if self._unique else ''}" \
+               f"{' NOT NULL' if not self._null else ''}" \
+               f"{f' DEFAULT {self._default}' if self._default else ''}"
+
+    def _validate_field_value(self, value):
+        if hasattr(self, '_choices'):
+            if self._choices and not value in self._choices:
+                raise ValueError(
+                    'The value you have assigned is out'
+                    ' of choices for this field.'
+                )
 
     @abstractmethod  # Used to transform python type to sql type
     def to_sql(self, value):
@@ -28,37 +53,68 @@ class Field(ABC):  # Basic model field class to inherit from
 
 
 class IntField(Field):  # Field to store int value aka SQL INTEGER
-    def __init__(self, default=None, null: bool=True, unique: bool=False):
-        super().__init__(self.to_sql(default) if default else None, null, unique)
+    def __init__(
+            self,
+            default=None,
+            null: bool=True,
+            unique: bool=False,
+            choices: tuple[int]=()
+    ):
+        super().__init__(
+            int, self.to_sql(default) if default else None,
+            null, unique, choices
+        )
 
     def sql_init(self):
         return f'''int''' + super().sql_init()
 
     def to_sql(self, value: int | str):
+        self._validate_field_value(value)
         return str(value) if isinstance(value, int) else value
 
     def from_sql(self, value: int):
+        self._validate_field_value(value)
         return value
 
 
 class CharField(Field):  # Field to store short string value aka SQL VARCHAR
-    def __init__(self, default=None, size: int=255, null: bool = True, unique: bool = False):
-        super().__init__(self.to_sql(default) if default else None, null, unique)
-        self.size = size
+    def __init__(
+            self,
+            size: int=None,
+            default: str=None,
+            null: bool = True,
+            unique: bool = False,
+            choices: tuple[str]=()
+    ):
+        super().__init__(
+            str, self.to_sql(default) if default else None,
+            null, unique, choices
+        )
+        self.size = size if size else len(default) if default else 255
 
     def sql_init(self):
         return f'''VARCHAR({self.size})''' + super().sql_init()
 
     def to_sql(self, value: str):
+        self._validate_field_value(value)
         return f'\'{value}\'' if isinstance(value, str) else value
 
     def from_sql(self, value: str):
+        self._validate_field_value(value)
         return value
 
 
 class TextField(Field):  # Field to store long string value aka SQL TEXT
-    def __init__(self, default=None, null: bool = True, unique: bool = False):
-        super().__init__(self.to_sql(default) if default else None, null, unique)
+    def __init__(
+            self,
+            default=None,
+            null: bool=True,
+            unique: bool=False
+    ):
+        super().__init__(
+            str, self.to_sql(default) if default else None,
+            null, unique
+        )
 
     def sql_init(self):
         return f'''TEXT''' + super().sql_init()
@@ -71,8 +127,17 @@ class TextField(Field):  # Field to store long string value aka SQL TEXT
 
 
 class DateTimeField(Field):  # Field to store datetime value aka SQL DATETIME
-    def __init__(self, default=None, null: bool = True, unique: bool = False):
-        super().__init__(self.to_sql(default) if default else None, null, unique)
+    def __init__(
+            self,
+            default=None,
+            null: bool=True,
+            unique: bool=False,
+    ):
+        super().__init__(
+            datetime.datetime,
+            self.to_sql(default) if default else None,
+            null, unique
+        )
 
     def sql_init(self):
         return f'''DATETIME''' + super().sql_init()
@@ -85,8 +150,16 @@ class DateTimeField(Field):  # Field to store datetime value aka SQL DATETIME
 
 
 class BooleanField(Field):  # Field to store bool value aka SQL BIT
-    def __init__(self, default=None, null: bool = True, unique: bool = False):
-        super().__init__(self.to_sql(default) if default else None, null, unique)
+    def __init__(
+            self,
+            default=None,
+            null: bool = True,
+            unique: bool = False
+    ):
+        super().__init__(
+            bool, self.to_sql(default) if default else None,
+            null, unique
+        )
 
     def sql_init(self):
         return f'''bit''' + super().sql_init()
@@ -99,8 +172,16 @@ class BooleanField(Field):  # Field to store bool value aka SQL BIT
 
 
 class JSONField(Field):  # Field to store dict value aka SQL JSON
-    def __init__(self, default=None, null: bool = True, unique: bool = False):
-        super().__init__(self.to_sql(default) if default else None, null, unique)
+    def __init__(
+            self,
+            default=None,
+            null: bool = True,
+            unique: bool = False,
+    ):
+        super().__init__(
+            dict, self.to_sql(default) if default else None,
+            null, unique
+        )
 
     def sql_init(self):
         return f'''JSON''' + super().sql_init()
@@ -113,8 +194,17 @@ class JSONField(Field):  # Field to store dict value aka SQL JSON
 
 
 class DurationField(Field):  # Field to store timedelta value aka SQL INT
-    def __init__(self, default=None, null: bool = True, unique: bool = False):
-        super().__init__(self.to_sql(default) if default else None, null, unique)
+    def __init__(
+            self,
+            default=None,
+            null: bool = True,
+            unique: bool = False
+    ):
+        super().__init__(
+            datetime.timedelta,
+            self.to_sql(default) if default else None,
+            null, unique
+        )
 
     def sql_init(self):
         return f'''int''' + super().sql_init()
@@ -125,31 +215,48 @@ class DurationField(Field):  # Field to store timedelta value aka SQL INT
     def from_sql(self, value: int):
         return datetime.timedelta(seconds=value)
 
+# ON DELETE and ON UPDATE options list
+CASCADE = 'CASCADE'
+RESTRICT = 'RESTRICT'
+SET_NULL = 'SET NULL'
+SET_DEFAULT = 'SET DEFAULT'
+NO_ACTION = 'NO ACTION'
+
 
 class LinkField:  # Field to inherit from for table linking fields
-    CASCADE = 'CASCADE'
-    RESTRICT = 'RESTRICT'
-    SET_NULL = 'SET NULL'
-    SET_DEFAULT = 'SET DEFAULT'
-    NO_ACTION = 'NO ACTION'
+    def __init__(
+            self,
+            on_delete: str=NO_ACTION,
+            on_update: str=NO_ACTION
+    ):
+        self._on_delete = on_delete
+        self._on_update = on_update
 
-    def __init__(self, on_delete: str=RESTRICT, on_update: str=RESTRICT):
-        self.on_delete = on_delete
-        self.on_update = on_update
+    def sql_init(self):
+        return f""" ON DELETE {self._on_delete} ON UPDATE {self._on_update}"""
 
 
 class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one relationships aka SQL FOREIGN KEY
     def __init__(
-            self, ref, null: bool = True, unique: bool = False,
-            on_delete: str=LinkField.RESTRICT,
-            on_update: str=LinkField.RESTRICT
+            self,
+            ref,  # Reference model
+            null: bool = True,
+            unique: bool = False,
+            on_delete: str=NO_ACTION,
+            on_update: str=NO_ACTION
     ):
         IntField.__init__(self, None, null, unique)
         LinkField.__init__(self, on_delete, on_update)
         self.ref = ref
 
     def to_sql(self, value: int):
-        return str(value.id)
+        if ref != value.model:
+            raise TypeError(
+                f'Wrong model type for ForeignKey: '
+                f'expected {ref.__name__} but got {value.model.__name__}'
+            )
+        else:
+            return str(value.id)
 
     def from_sql(self, value: str):
         return self.ref.get(id=value)
@@ -158,23 +265,38 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
         self.name = name
 
     def sql_init(self):
-        return super().sql_init() + f""", FOREIGN KEY ({self.name
-        }) REFERENCES {self.ref.table_name} (id) ON DELETE {self.on_delete
-        } ON UPDATE {self.on_update}"""
+        return IntField.sql_init(self) + f""", FOREIGN KEY ({self.name
+        }) REFERENCES {self.ref.table_name} (id)""" + LinkField.sql_init(self)
 
 
 class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-many relationships aka SQL TABLE m1_m2
     def __init__(
-            self, ref, null: bool = True, unique: bool = False,
-            on_delete: str = '', on_update: str = ''
+            self,
+            ref,  # Reference model
+            null: bool = True,
+            unique: bool = False,
+            on_delete: str = NO_ACTION,
+            on_update: str = NO_ACTION
     ):
         IntField.__init__(self, None, null, unique)
         LinkField.__init__(self, on_delete, on_update)
-        self.m2 = ref
+        self.__m2 = ref
 
-    def create_table(self):
+    @property
+    def m1(self):
+        return self.__m1
+
+    @m1.setter
+    def m1(self, value):
+        self.__m1 = value
+
+    @property
+    def m2 (self):
+        return self.__m2
+
+    def create(self):
         try:  # Creating junction table
-            with connect(**m.db_data) as connection:
+            with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(f'''CREATE TABLE IF NOT EXISTS {
                     self.m1.__name__}_{self.m2.__name__} ({
@@ -183,87 +305,103 @@ class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-
                     self.m1.table_name} (id) ON DELETE CASCADE ON UPDATE CASCADE,
                     {self.m2.__name__.lower()}_id int,
                     FOREIGN KEY ({self.m2.__name__.lower()}_id) REFERENCES {
-                    self.m2.table_name} (id) ON DELETE {self.on_delete} ON UPDATE {
-                    self.on_update}, CONSTRAINT unique_together UNIQUE ({
+                    self.m2.table_name} (id) {LinkField.sql_init(self)
+                    }, CONSTRAINT unique_together UNIQUE ({
                     self.m1.__name__.lower()}_id, {self.m2.__name__.lower()}_id)
                     )''')
         except Error as err:
             print(err)
 
-    def read_table(self, m1_id: int):
-        try:
-            with connect(**m.db_data) as connection:
-                with connection.cursor(dictionary=True) as cursor:
+    def select(self, m1_id: int):
+        try:  # Selecting rows from junction table
+            with connect(**db_data) as connection:
+                with connection.cursor() as cursor:
                     m1_name, m2_name = self.m1.__name__, self.m2.__name__
-                    query = f"""SELECT * FROM {m1_name}_{m2_name} WHERE {
-                    m1_name.lower()}_id = {m1_id}"""
-                    cursor.execute(query)
-                    results = cursor.fetchall()
-                    return self.m2.filter(Q.Or(*[Q(id=r[f'{m2_name.lower()}_id']) for r in results]))
+                    cursor.execute(
+                        f"""SELECT {m2_name.lower()}_id FROM {m1_name}_{m2_name} WHERE {
+                        m1_name.lower()}_id = {m1_id}"""
+                    )
+                    return cont.QuerySet(self.m2, {
+                        'args': (),
+                        'kwargs': {'id__in': tuple(chain(*cursor.fetchall()))}
+                    })
         except Error as err:
             print(err)
 
-    def insert_table(self, m1_id: int, m2_id: int):
-        try:
-            with connect(**m.db_data) as connection:
+    def insert(self, m1_id: int, m2_id: int):
+        try:  # Inserting row into junction table
+            with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
                     m1_name, m2_name = self.m1.__name__, self.m2.__name__
-                    query = f'''INSERT INTO {m1_name}_{m2_name} (
-                    {m1_name.lower()}_id, {m2_name.lower()}_id)
-                     VALUES ({m1_id}, {m2_id})'''
-                    cursor.execute(query)
+                    cursor.execute(
+                        f'''INSERT INTO {m1_name}_{m2_name} ({
+                        m1_name.lower()}_id, {m2_name.lower()
+                        }_id) VALUES ({m1_id}, {m2_id})'''
+                    )
                     connection.commit()
         except Error as err:
             print(err)
 
-    def delete_table(self, m2_id: int):
-        try:
-            with connect(**m.db_data) as connection:
+    def delete(self, m2_id: int):
+        try:  # Deleting row from junction table
+            with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
-                    query = f'''DELETE FROM {self.m1.__name__}_{self.m2.__name__}
-                     WHERE {self.m2.__name__.lower()}_id = {m2_id}'''
-                    cursor.execute(query)
+                    cursor.execute(
+                        f'''DELETE FROM {self.m1.__name__}_{self.m2.__name__
+                        } WHERE {self.m2.__name__.lower()}_id = {m2_id}'''
+                    )
                     connection.commit()
         except Error as err:
             print(err)
-
-    def set_m1(self, m1):
-        self.m1 = m1
-
-    def sql_init(self):
-        return ''
 
 
 class ManyToManyFieldInstance:  # Wrapper to work with M2M field using model instance
     def __init__(self, m2m: ManyToManyField, m1_id: int):
-        self.m2m = m2m
-        self.m1_id = m1_id
-        self.refs = m2m.read_table(m1_id)
+        self.__m2m = m2m
+        self.__m1_id = m1_id
+        self.__refs = m2m.select(m1_id)
 
-    def append(self, ref):
-        self.m2m.insert_table(self.m1_id, ref.id)
-        self.refs.append(ref)
+    def append(self, ref):  # Appending model instance to model's m2m
+        if not issubclass(type(ref), mdl.ModelInstance):
+            raise TypeError(
+                f'You can only store model instances in ManyToManyField:'
+                f' got type "{type(ref).__name__}"'
+            )
+        elif ref.model != self.__m2m.m2:
+            raise TypeError(
+                f"Model type does not match ManyToManyField's one:"
+                f" expected {self.__m2m.m2.__name__} but got {ref.model.__name__}"
+            )
+        self.__m2m.insert(self.__m1_id, ref.id)
+        self.__refs = self.__refs + ref.model.filter(id=ref.id)
 
-    def filter(self, **kwargs):  # MAKE SQL BASED
-        fields = self.m2m.m2.get_fields(self.m2m.m2)
-        id = kwargs.pop('id', None)
-        for name in kwargs.keys():
-            if not name in fields:  # Checking if all fields specified right
-                raise ModelException('Wrong fields specified in m2m get method')
-        if id: kwargs['id'] = id
-        def constraint(ref):
-            return all([getattr(ref, name) == value for name, value in kwargs.items()])
-        return list(filter(constraint, self.refs))
-
-    def get(self, **kwargs):
-        try:
-            return self.filter(**kwargs)[0]
-        except IndexError:
-            return None
-
-    def delete(self, ref):
-        if ref.id in [r.id for r in self.refs]:
-            self.m2m.delete_table(ref.id)
-            self.refs = [r for r in self.refs if r.id != ref.id]
+    def delete(self, ref):  # Deleting model instance from model's m2m
+        if ref in self.__refs:
+            self.__m2m.delete(ref.id)
+            self.__refs = self.__refs.exclude(id=ref.id)
         else:
-            raise ModelException('No model found in m2m field')
+            raise KeyError('No submodel found in ManyToManyField')
+    # Next methods make projection on nested QuerySet object
+    def filter(self, **kwargs):
+        return self.__refs.filter(**kwargs)
+
+    def get(self, *args, **kwargs):
+        return self.__refs.get(*args, **kwargs)
+
+    def exclude(self, *args, **kwargs):
+        return self.__refs.exclude(*args, **kwargs)
+
+    def __iter__(self):
+        return self.__refs.__iter__()
+
+    def __getitem__(self, key: int | slice):
+        return self.__refs.__getitem__(key)
+
+    def __contains__(self, item):
+        return self.__refs.__contains__(item)
+
+    def __str__(self) -> str:
+        return self.__refs.__str__()
+
+    def __len__(self):
+        return self.__refs.__len__()
