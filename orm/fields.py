@@ -24,24 +24,21 @@ class Field(ABC):  # Basic model field class to inherit from
             raise TypeError(
                 f'{type(self).__name__} choices parameter must contain only {dtype} values'
             )
+        self.__name = None       # field name sometimes required in sql syntax
         self._choices = choices  # choices parameter restricts set of values attribute can take
         self._null = null        # null => {True => "", False => "NOT NULL"}
         self._unique = unique    # unique => {True => "UNIQUE", False => ""}
         self._default = default  # default = <value> => "DEFAULT <value>"
         super().__init__()
 
-    def sql_init(self):  # Used in CREATE query to form column description
-        return f"{' UNIQUE' if self._unique else ''}" \
-               f"{' NOT NULL' if not self._null else ''}" \
-               f"{f' DEFAULT {self._default}' if self._default else ''}"
-
-    def _validate_field_value(self, value):
-        if hasattr(self, '_choices'):
-            if self._choices and not value in self._choices:
-                raise ValueError(
-                    'The value you have assigned is out'
-                    ' of choices for this field.'
-                )
+    def sql_init(self, name: str):  # Used in CREATE query to form column description
+        self._name = name
+        return ' ' + ' '.join(
+            'UNIQUE' if self._unique else '',
+            'NOT NULL' if not self._null else '',
+            f'DEFAULT {self._default}' if self._default else '',
+            f'CHECK ({name} IN {self._choices})' if self._choices else ''
+        )
 
     @abstractmethod  # Used to transform python type to sql type
     def to_sql(self, value):
@@ -65,11 +62,10 @@ class IntField(Field):  # Field to store int value aka SQL INTEGER
             null, unique, choices
         )
 
-    def sql_init(self):
-        return f'''int''' + super().sql_init()
+    def sql_init(self, name: str):
+        return f'{name} int' + super().sql_init(name)
 
     def to_sql(self, value: int | str):
-        self._validate_field_value(value)
         return str(value) if isinstance(value, int) else value
 
     def from_sql(self, value: int):
@@ -80,7 +76,7 @@ class IntField(Field):  # Field to store int value aka SQL INTEGER
 class CharField(Field):  # Field to store short string value aka SQL VARCHAR
     def __init__(
             self,
-            size: int=None,
+            size: int=255,
             default: str=None,
             null: bool = True,
             unique: bool = False,
@@ -90,13 +86,12 @@ class CharField(Field):  # Field to store short string value aka SQL VARCHAR
             str, self.to_sql(default) if default else None,
             null, unique, choices
         )
-        self.size = size if size else len(default) if default else 255
+        self.size = size
 
-    def sql_init(self):
-        return f'''VARCHAR({self.size})''' + super().sql_init()
+    def sql_init(self, name: str):
+        return f'{name} VARCHAR({self.size})' + super().sql_init(name)
 
     def to_sql(self, value: str):
-        self._validate_field_value(value)
         return f'\'{value}\'' if isinstance(value, str) else value
 
     def from_sql(self, value: str):
@@ -116,8 +111,8 @@ class TextField(Field):  # Field to store long string value aka SQL TEXT
             null, unique
         )
 
-    def sql_init(self):
-        return f'''TEXT''' + super().sql_init()
+    def sql_init(self, name: str):
+        return f'{name} TEXT' + super().sql_init(name)
 
     def to_sql(self, value: int):
         return f'\'{value}\'' if isinstance(value, str) else value
@@ -139,8 +134,8 @@ class DateTimeField(Field):  # Field to store datetime value aka SQL DATETIME
             null, unique
         )
 
-    def sql_init(self):
-        return f'''DATETIME''' + super().sql_init()
+    def sql_init(self, name: str):
+        return f'{name} DATETIME' + super().sql_init(name)
 
     def to_sql(self, value: datetime.datetime):
         return f'\'{value.strftime("%Y-%m-%d %H:%M:%S")}\'' if isinstance(value, datetime.datetime) else value
@@ -161,8 +156,8 @@ class BooleanField(Field):  # Field to store bool value aka SQL BIT
             null, unique
         )
 
-    def sql_init(self):
-        return f'''bit''' + super().sql_init()
+    def sql_init(self, name: str):
+        return f'{name} bit' + super().sql_init(name)
 
     def to_sql(self, value: bool):
         return str(int(value)) if isinstance(value, bool) else value
@@ -183,8 +178,8 @@ class JSONField(Field):  # Field to store dict value aka SQL JSON
             null, unique
         )
 
-    def sql_init(self):
-        return f'''JSON''' + super().sql_init()
+    def sql_init(self, name: str):
+        return f'{name} JSON' + super().sql_init(name)
 
     def to_sql(self, value: dict):
         return f'\'{json.dumps(value)}\'' if isinstance(value, dict) else value
@@ -206,8 +201,8 @@ class DurationField(Field):  # Field to store timedelta value aka SQL INT
             null, unique
         )
 
-    def sql_init(self):
-        return f'''int''' + super().sql_init()
+    def sql_init(self, name: str):
+        return f'''{name} int''' + super().sql_init(name)
 
     def to_sql(self, value: datetime.timedelta):
         return str(int(datetime.timedelta.total_seconds(value))) if isinstance(value, datetime.timedelta) else value
@@ -250,10 +245,10 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
         self.ref = ref
 
     def to_sql(self, value: int):
-        if ref != value.model:
+        if self.ref != value.model:
             raise TypeError(
                 f'Wrong model type for ForeignKey: '
-                f'expected {ref.__name__} but got {value.model.__name__}'
+                f'expected {self.ref.__name__} but got {value.model.__name__}'
             )
         else:
             return str(value.id)
@@ -261,11 +256,8 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
     def from_sql(self, value: str):
         return self.ref.get(id=value)
 
-    def set_name(self, name: str):
-        self.name = name
-
-    def sql_init(self):
-        return IntField.sql_init(self) + f""", FOREIGN KEY ({self.name
+    def sql_init(self, name: str):
+        return IntField.sql_init(self, name) + f""", FOREIGN KEY ({name
         }) REFERENCES {self.ref.table_name} (id)""" + LinkField.sql_init(self)
 
 
@@ -273,13 +265,12 @@ class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-
     def __init__(
             self,
             ref,  # Reference model
-            null: bool = True,
-            unique: bool = False,
             on_delete: str = NO_ACTION,
             on_update: str = NO_ACTION
     ):
-        IntField.__init__(self, None, null, unique)
+        IntField.__init__(self)
         LinkField.__init__(self, on_delete, on_update)
+        self.__m1 = None
         self.__m2 = ref
 
     @property
@@ -293,6 +284,10 @@ class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-
     @property
     def m2 (self):
         return self.__m2
+
+    def sql_init(self, name: str):
+        super().sql_init(name)
+        return ''
 
     def create(self):
         try:  # Creating junction table

@@ -20,7 +20,6 @@ class Airline(model.Model):
 
 
 class Route(model.Model):
-    flight_time = fields.DurationField(null=False)
     departure_time = fields.DateTimeField(null=False)
     departure_point = fields.ForeignKey(ref=Airport, null=False)
     arrival_time = fields.DateTimeField(null=False)
@@ -31,3 +30,4 @@ class Route(model.Model):
 class Flight(model.Model):
     routes = fields.ManyToManyField(ref=Route)
     costs = fields.JSONField(null=False)
+    airline = fields.ForeignKey(ref=Airline, null=False, on_delete=fields.CASCADE)

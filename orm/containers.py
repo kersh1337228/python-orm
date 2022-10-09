@@ -103,7 +103,7 @@ class QuerySet:
                 return self.__container[0]
         elif isinstance(key, slice):
             if not self.__executed:
-                if key.start and key.stop and key.start >= 0 and key.stop > key.start:
+                if all((key.start, key.stop, key.start >= 0, key.stop > key.start)):
                     match key.start, key.stop:
                         case start, None:
                             self.__query['offset'] = start

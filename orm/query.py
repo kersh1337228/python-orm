@@ -1,6 +1,6 @@
 import inspect
 import re
-from . import model as mod
+from . import model as mod, fields as fld
 from abc import ABC, abstractmethod
 
 
@@ -136,33 +136,59 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             if not subq[0] in fields:  # Checking if all fields specified right
                 raise Exception(f'Wrong field "{subq[0]}" specified in query')
             if len(subq) == 1:  # <name> = <value> simple constraint
-                constraints.append(f'{model.table_name}0.{name} = {fields[name].to_sql(kwargs[name])}')
+                constraints.append(
+                    f'''{model.table_name}0.{name} {
+                    "LIKE" if hasattr(model, name) and isinstance(
+                        getattr(model, name), fld.JSONField
+                    ) else "="} {fields[name].to_sql(kwargs[name])}'''
+                )
                 continue
             else:
                 opname = subq[-1] if subq[-1] in ops else None
                 fnames = subq[:-1] if opname else subq
                 # Getting table names nested structure
-                tabs_n_als = []
+                tabs_n_als = [(
+                    model.table_name,
+                    f'{model.table_name}0'
+                )]
                 m = model
-                for fn in fnames:
-                    tabs_n_als.append((
-                        m.table_name,
-                        f'{m.table_name}{Q.join_index}'
-                    ))
-                    try:
-                        m = getattr(m, fn).ref
-                        Q.join_index += 1
-                    except AttributeError:
-                        break
-                # Listing joins based on field and table names
-                for i in range(len(tabs_n_als) - 1):
-                    joins.append(
-                        f""" LEFT JOIN {tabs_n_als[i + 1][0]} AS {
-                        tabs_n_als[i + 1][1]} ON {
-                        tabs_n_als[i][1] if tabs_n_als[i][0] != model.table_name 
-                        else model.table_name + '0'}.{fnames[i]} = {
-                        tabs_n_als[i + 1][1]}.id"""
-                    )
+                for fn in fnames:  # Using joins to specify subfields constraints
+                    if hasattr(m, fn):
+                        attr = getattr(m, fn)
+                        if isinstance(attr, fld.ForeignKey):
+                            m = getattr(m, fn).ref
+                            Q.join_index += 1
+                            tabs_n_als.append((
+                                m.table_name,
+                                f'{m.table_name}{Q.join_index}'
+                            ))
+                            joins.append(
+                                f""" LEFT JOIN {tabs_n_als[-1][0]} AS {
+                                tabs_n_als[-1][1]} ON {
+                                tabs_n_als[-2][1]}.{fn} = {
+                                tabs_n_als[-1][1]}.id"""
+                            )
+                        elif isinstance(attr, fld.ManyToManyField):
+                            m = getattr(m, fn).m2
+                            Q.join_index += 1
+                            tabs_n_als.append((
+                                m.table_name,
+                                f'{m.table_name}{Q.join_index}'
+                            ))
+                            joins.extend((
+                                f""" RIGHT JOIN {tabs_n_als[-2][0][:-1]
+                                }_{tabs_n_als[-1][0][:-1]
+                                } AS joint_table{Q.join_index + 1
+                                } ON {tabs_n_als[-2][1]}.id = joint_table{
+                                Q.join_index + 1}.{tabs_n_als[-2][0][:-1].lower()}_id""",
+                                f""" LEFT JOIN {tabs_n_als[-1][0]} AS {
+                                tabs_n_als[-1][1]} ON joint_table{
+                                Q.join_index + 1}.{tabs_n_als[-1][0][:-1].lower()}_id = {
+                                tabs_n_als[-1][1]}.id"""
+                            ))
+                            Q.join_index += 1
+                        else:
+                            break
                 # Transforming value specified into SQL form if not field equals id
                 fval, fname = kwargs[name], fnames[-1]
                 if hasattr(m, fname):  # Check if model has the field given
@@ -174,8 +200,13 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
                 full_fname = f'{tabs_n_als[-1][1]}.{fname}'
                 # Appending constraint
                 match opname:
-                    case None:  # Exact match aka =
-                        constraints.append(f'{full_fname} = {fval}')
+                    case None:  # Exact match aka = (LIKE for JSON)
+                        constraints.append(
+                            f'''{full_fname} {
+                            "LIKE" if hasattr(m, fname) and isinstance(
+                                getattr(m, fname), fld.JSONField
+                            ) else "="} {fval}'''
+                        )
                     case 'gt' | 'gte' | 'lt' | 'lte':  # Logical statement aka > \ >= \ < \ <=
                         constraints.append(f'{full_fname} {lops[opname]} {fval}')
                     case 'startswith':  # String starts with substring

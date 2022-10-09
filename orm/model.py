@@ -67,11 +67,6 @@ class Model:
                     f'Field name must not contain "__" symbol combination:'
                     f' "{name}".'
                 )
-            if name == 'id':  # Reserved name
-                raise AttributeError(
-                    f'You can not name your model field "id". '
-                    f'This field name is reserved.'
-                )
 
     @classmethod
     @property
@@ -94,9 +89,6 @@ class Model:
                         fields[name] = attr
                 except:
                     continue
-            for name, field in fields.items():
-                if isinstance(field, fld.ForeignKey):
-                    field.set_name(name)
             cls.__fields = fields
             return fields
 
@@ -117,21 +109,23 @@ class Model:
             self.__validate_field_names(self)
         except TypeError:  # ... or in regular method
             self.__validate_field_names()
-        inits = []
-        for name, value in fields.items():
-            if not isinstance(value, fld.ManyToManyField):  # If not m2m field then is in table
-                inits.append(f'{name} {value.sql_init()}')
-            else:  # If m2m field then
-                value.m1 = self  # Setting m1 model as current one
-                value.create()  # And creating necessary joint table
         try:
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(
                         f'''CREATE TABLE IF NOT EXISTS {self.table_name
-                        } (id int NOT NULL UNIQUE AUTO_INCREMENT, PRIMARY KEY (id),
-                        {', '.join(inits)})'''
+                        } (id int NOT NULL UNIQUE AUTO_INCREMENT,
+                        PRIMARY KEY (id),
+                        {', '.join(
+                            value.sql_init(name)
+                            for name, value in self.fields.items()
+                            if name != 'id'
+                        )})'''
                     )
+                    for field in self.fields.values():
+                        if isinstance(field, fld.ManyToManyField):
+                            field.m1 = self  # Setting m1 model as current one
+                            field.create()   # And creating necessary joint table
         except Error as err:
             print(err)
 
@@ -140,7 +134,9 @@ class Model:
         cls.check_table()
         vals = []  # Placeholder for SQL-friendly fields values
         for name, val in kwargs.items():
-            if not name in cls.fields:  # Checking if all fields specified right
+            if not name in cls.fields or isinstance(
+                    cls.fields[name], fld.ManyToManyField
+            ):  # Checking if all fields specified right
                 raise Exception(f'Wrong field specified in create method: "{name}"')
             else:  # Converting fields value to SQL-friendly form
                 vals.append(cls.fields[name].to_sql(val))
