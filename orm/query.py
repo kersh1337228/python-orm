@@ -236,6 +236,13 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             'constraints': ' AND '.join(constraints)
         }
 
+    @staticmethod
+    def make_order_by(
+        model,  # Allows to gain access to model resources
+        *args   # Field names and direction for ORDER BY command
+    ):
+        pass
+
     def __init__(self, **kwargs):
         if len(kwargs) > 1:
             raise Exception('Q class constructor argument must be a single kwarg')
@@ -260,23 +267,28 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
         return Q.make_query(model, **self.query)
 
 
-def assemble_query(
-        model,  # Allows to gain access to model resources
-        *args,  # Q class queries
-        **kwargs  # Regular keyword queries
+def assemble_query(  # Making SQL query-string for given model with given parameters
+        model,       # Allows to gain access to model resources
+        query: dict  # Dictionary storing query parameters
 ):
-    assembled = {'joins': [], 'constraints': []}
-    for arg in args:
+    assembled = {'joins': [], 'constraints': [], 'orders': []}
+    for arg in query['args']:
         ass = arg.assemble_query(model)
         assembled['joins'].extend(ass['joins'])
         assembled['constraints'].append(f"({ass['constraints']})")
-    if kwargs:
-        ass = Q.make_query(model, **kwargs)
+    if query['kwargs']:
+        ass = Q.make_query(model, **query['kwargs'])
         assembled['joins'].extend(ass['joins'])
         assembled['constraints'].append(f"({ass['constraints']})")
     Q.join_index = 0
-    return ''.join(
+    result =  ''.join(
         assembled['joins']
-    ) + ' WHERE ' + ' AND '.join(
+    ) + ' WHERE id > 0' + ' AND '.join(
         assembled['constraints']
-    ) if assembled['constraints'] else ''
+    ) + (
+        f'ORDER BY {1}' if query.get('order_by', None) else ''
+    ) + (
+        f' LIMIT {query["limit"]}' if query.get('limit', None) else ''
+    ) + (
+        f' OFFSET {query["offset"]}' if query.get('offset', None) else ''
+    )

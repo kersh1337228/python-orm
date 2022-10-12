@@ -6,5 +6,4 @@ from orm.query import Q
 
 
 if __name__ == '__main__':
-    list(Order.filter())
-    pass
+    Flight.filter().order_by('-airline__name')

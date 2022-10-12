@@ -67,13 +67,8 @@ class QuerySet:
                                 if not isinstance(fval, fld.ManyToManyField)
                             )} FROM {self.__model.table_name} AS {
                             self.__model.table_name}0{qr.assemble_query(
-                                self.__model,
-                                *q['args'],
-                                **q['kwargs']
-                            )}{f' LIMIT {self.__query["limit"]}'
-                            if self.__query.get("limit", None) else ''}{
-                            f' OFFSET {self.__query["offset"]}'
-                            if self.__query.get("offset", None) else ''}"""
+                                self.__model, q
+                            )}"""
                             for q in [self.__query] + self.__union
                         )
                     )
@@ -141,9 +136,7 @@ class QuerySet:
                                 }0 INNER JOIN {self.__model.table_name} AS intersect ON {
                                 self.__model.table_name}0.id = intersect.id{
                                 qr.assemble_query(
-                                    self.__model,
-                                    *self.__query['args'],
-                                    **self.__query['kwargs']
+                                    self.__model, self.__query
                                 )} AND intersect.id = {item.id}{f' LIMIT {self.__query["limit"]}'
                                 if self.__query.get("limit", None) else ''}{
                                 f' OFFSET {self.__query["offset"]}'
@@ -172,9 +165,7 @@ class QuerySet:
                             f"""SELECT COUNT(*) FROM {
                             self.__model.table_name} AS {self.__model.table_name
                             }0{qr.assemble_query(
-                                self.__model,
-                                *self.__query['args'],
-                                **self.__query['kwargs']
+                                self.__model, self.__query
                             )}{f' LIMIT {self.__query["limit"]}'
                             if self.__query.get("limit", None) else ''}{
                             f' OFFSET {self.__query["offset"]}'
@@ -224,9 +215,7 @@ class QuerySet:
                         self.__model.table_name}0.id FROM {
                         self.__model.table_name} AS {self.__model.table_name}0{
                         qr.assemble_query(
-                            self.__model,
-                            *self.__query['args'],
-                            **self.__query['kwargs']
+                            self.__model, self.__query
                         )}{f' LIMIT {self.__query["limit"]}'
                         if self.__query.get("limit", None) else ''}{
                         f' OFFSET {self.__query["offset"]}'
@@ -250,9 +239,7 @@ class QuerySet:
                         self.__model.table_name}0.id FROM (SELECT * FROM {
                         self.__model.table_name}) AS {self.__model.table_name}0{
                         qr.assemble_query(
-                            self.__model,
-                            *self.__query['args'],
-                            **self.__query['kwargs']
+                            self.__model, self.__query
                         )}{f' LIMIT {self.__query["limit"]}'
                         if self.__query.get("limit", None) else ''}{
                         f' OFFSET {self.__query["offset"]}'
@@ -272,9 +259,7 @@ class QuerySet:
                             f"""SELECT EXISTS(SELECT * FROM {
                             self.__model.table_name} AS {self.__model.table_name
                             }0{qr.assemble_query(
-                                self.__model,
-                                *self.__query['args'],
-                                **self.__query['kwargs']
+                                self.__model, self.__query
                             )}{f' LIMIT {self.__query["limit"]}'
                             if self.__query.get("limit", None) else ''}{
                             f' OFFSET {self.__query["offset"]}'
@@ -286,6 +271,24 @@ class QuerySet:
                 print(err)
         else:
             return bool(self.__container)
+
+    def order_by(self, *args):  # *args format: '(-)<field>__<subfield>__...__<subfield>'
+        for arg in args:
+            if isinstance(arg, str):
+                subfs = arg.split('__')
+                if subfs[0].split('-')[1] in self.__model.fields:
+                    pass
+                else:  # Check if model has field listed
+                    raise AttributeError(
+                        f'Model {self.__model.__name__} does'
+                        f' not have field named {subfs[0]}'
+                    )
+            else:  # Check if all order_by parameters are strings
+                raise TypeError(
+                    f'Wrong argument type for order_by method:'
+                    f' expected str but got {type(arg).__name__}'
+                )
+        self.__query['order_by'] = args
 
     def __bool__(self):
         return self.exists()
