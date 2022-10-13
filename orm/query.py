@@ -1,5 +1,3 @@
-import inspect
-import re
 from . import model as mod, fields as fld
 from abc import ABC, abstractmethod
 
@@ -28,6 +26,31 @@ class BaseOperation(ABC):  # Database operation interface
     @abstractmethod  # Logical NOT operation
     def __invert__(self):
         pass
+
+
+ops = {  # SQL operations used in WHERE constraints
+    '': lambda name, val: f'''{name} = {val}''',
+    'gt': lambda name, val: f'''{name} > {val}''',
+    'gte': lambda name, val: f'''{name} >= {val}''',
+    'lt': lambda name, val: f'''{name} < {val}''',
+    'lte': lambda name, val: f'''{name} <= {val}''',
+    'startswith': lambda name, val: f"""{name} LIKE BINARY '{val.replace("'", "")}%'""",
+    'istartswith': lambda name, val: f"""LOWER({name}) LIKE '{val.replace("'", "").lower()}%'""",
+    'endswith': lambda name, val: f"""{name} LIKE BINARY '%{val.replace("'", "")}'""",
+    'iendswith': lambda name, val: f"""LOWER({name}) LIKE '%{val.replace("'", "").lower()}'""",
+    'contains': lambda name, val: f"""{name} LIKE BINARY '%{val.replace("'", "")}%'""",
+    'icontains': lambda name, val: f"""LOWER({name}) LIKE '%{val.replace("'", "").lower()}%'""",
+    'range': lambda name, val: f"{name} BETWEEN {val[0]} AND {val[1]}",
+    'year': lambda name, val: f"year({name}) = {val}",
+    'month': lambda name, val: f"month({name}) = {val}",
+    'day': lambda name, val: f"day({name}) = {val}",
+    'hour': lambda name, val: f"hour({name}) = {val}",
+    'minute': lambda name, val: f"minute({name}) = {val}",
+    'second': lambda name, val: f"second({name}) = {val}",
+    'isnull': lambda name, val: f"{name} IS {'NOT' if not val else ''} NULL",
+    'regex': lambda name, val: f"{name} LIKE {val}",
+    'in': lambda name, val: f"{name} IN {val}"
+}
 
 
 class Q(BaseOperation):  # Query class to add more complex constraints like AND, OR, NOT
@@ -84,12 +107,12 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             return Q.And([~q for q in self.subset])
 
         def assemble_query(self, model):
-            assembled = {'joins': [], 'constraints': ''}
+            assembled = {'joins': [], 'constraints': []}
             for q in self.subset:
                 ass = q.assemble_query(model)
                 assembled['joins'].extend(ass['joins'])
-                assembled['constraints'] += f"({ass['constraints']}) OR "
-            assembled['constraints'] = assembled['constraints'][:-4]
+                assembled['constraints'].append(f"({ass['constraints']})")
+            assembled['constraints'] = ' OR '.join(assembled['constraints'])
             return assembled
 
     class Not(BaseOperation):  # Logical NOT wrapper
@@ -116,136 +139,90 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             assembled['constraints'] = 'NOT (' + assembled['constraints'] + ')'
             return assembled
 
-    join_index = 0
+    join_index = 1
 
     @staticmethod
-    def make_query(
-            model,                # Allows to gain access to model resources
-            **kwargs              # Regular keyword queries
-    ):
-        fields = model.fields  # Getting model template aka fields list
-        constraints, joins = [], []  # Initializing query concatenate list
-        ops = (  # Query operations available
-            'gt', 'gte', 'lt', 'lte', 'startswith', 'istartswith', 'endswith',
-            'iendswith', 'contains', 'icontains', 'range', 'year', 'month',
-            'day', 'hour', 'minute', 'second', 'isnull', 'regex', 'in'
-        )
-        lops = {'gt': '>', 'gte': '>=', 'lt': '<', 'lte': '<='}  # Logical operations and their aliases
-        for name in kwargs.keys():  # Query format "<field>__<subfield_1>__...__<subfield_n>(__<operation>)=<value>"
-            subq = name.split('__')
-            if not subq[0] in fields:  # Checking if all fields specified right
-                raise Exception(f'Wrong field "{subq[0]}" specified in query')
-            if len(subq) == 1:  # <name> = <value> simple constraint
-                constraints.append(
-                    f'''{model.table_name}0.{name} {
-                    "LIKE" if hasattr(model, name) and isinstance(
-                        getattr(model, name), fld.JSONField
-                    ) else "="} {fields[name].to_sql(kwargs[name])}'''
-                )
-                continue
+    def make_query(model, **kwargs):  # Create SQL-query string from keyword one
+        joins, constraints = [], []
+        for query, value in kwargs.items():
+            parts = query.split('__')
+            opname = parts[-1] if parts[-1] in ops else ''
+            fnames = parts[:-1] if opname else parts
+            # Getting table names nested structure
+            current_model = model
+            for field in fnames:  # Using joins to specify subfield constraints
+                if not field in current_model.fields:
+                    raise AttributeError(
+                        f'Wrong field "{field}" specified in '
+                        f'query for model {current_model.__name__}'
+                    )
+                else:
+                    try:  # Adding joins for ForeignKey and ManyToManyField
+                        attr = getattr(current_model, field)
+                        joins.extend(attr.get_joins(
+                            f'{current_model.table_name}'
+                            f'{Q.join_index - 1 if current_model != model else 0}',
+                            field, Q.join_index
+                        ))
+                        current_model = attr.ref
+                        Q.join_index += 1
+                    except AttributeError:
+                        break
+            if fnames[-1] in current_model.fields:  # Reformatting value given into SQL-friendly one
+                fval = current_model.fields.get(fnames[-1]).to_sql(value)
             else:
-                opname = subq[-1] if subq[-1] in ops else None
-                fnames = subq[:-1] if opname else subq
-                # Getting table names nested structure
-                tabs_n_als = [(
-                    model.table_name,
-                    f'{model.table_name}0'
-                )]
-                m = model
-                for fn in fnames:  # Using joins to specify subfields constraints
-                    if hasattr(m, fn):
-                        attr = getattr(m, fn)
-                        if isinstance(attr, fld.ForeignKey):
-                            m = getattr(m, fn).ref
-                            Q.join_index += 1
-                            tabs_n_als.append((
-                                m.table_name,
-                                f'{m.table_name}{Q.join_index}'
-                            ))
-                            joins.append(
-                                f""" LEFT JOIN {tabs_n_als[-1][0]} AS {
-                                tabs_n_als[-1][1]} ON {
-                                tabs_n_als[-2][1]}.{fn} = {
-                                tabs_n_als[-1][1]}.id"""
-                            )
-                        elif isinstance(attr, fld.ManyToManyField):
-                            m = getattr(m, fn).m2
-                            Q.join_index += 1
-                            tabs_n_als.append((
-                                m.table_name,
-                                f'{m.table_name}{Q.join_index}'
-                            ))
-                            joins.extend((
-                                f""" RIGHT JOIN {tabs_n_als[-2][0][:-1]
-                                }_{tabs_n_als[-1][0][:-1]
-                                } AS joint_table{Q.join_index + 1
-                                } ON {tabs_n_als[-2][1]}.id = joint_table{
-                                Q.join_index + 1}.{tabs_n_als[-2][0][:-1].lower()}_id""",
-                                f""" LEFT JOIN {tabs_n_als[-1][0]} AS {
-                                tabs_n_als[-1][1]} ON joint_table{
-                                Q.join_index + 1}.{tabs_n_als[-1][0][:-1].lower()}_id = {
-                                tabs_n_als[-1][1]}.id"""
-                            ))
-                            Q.join_index += 1
-                        else:
-                            break
-                # Transforming value specified into SQL form if not field equals id
-                fval, fname = kwargs[name], fnames[-1]
-                if hasattr(m, fname):  # Check if model has the field given
-                    fval = getattr(m, fname).to_sql(fval)
-                elif fname == 'id':  # Exception is id which is reserved by default
-                    pass
-                else:  # If no such field then it can be either field or operation listed incorrectly
-                    raise AttributeError(f'Wrong operation or model field name specified: "{fname}"')
-                full_fname = f'{tabs_n_als[-1][1]}.{fname}'
-                # Appending constraint
-                match opname:
-                    case None:  # Exact match aka = (LIKE for JSON)
-                        constraints.append(
-                            f'''{full_fname} {
-                            "LIKE" if hasattr(m, fname) and isinstance(
-                                getattr(m, fname), fld.JSONField
-                            ) else "="} {fval}'''
-                        )
-                    case 'gt' | 'gte' | 'lt' | 'lte':  # Logical statement aka > \ >= \ < \ <=
-                        constraints.append(f'{full_fname} {lops[opname]} {fval}')
-                    case 'startswith':  # String starts with substring
-                        constraints.append(f"""{full_fname} LIKE BINARY '{fval.replace("'", "")}%'""")
-                    case 'istartswith':  # String starts with substring case-insensitive
-                        constraints.append(f"""LOWER({full_fname}) LIKE '{fval.replace("'", "").lower()}%'""")
-                    case 'endswith':  # String ends with substring
-                        constraints.append(f"""{full_fname} LIKE BINARY '%{fval.replace("'", "")}'""")
-                    case 'iendswith':  # String ends with substring case-insensitive
-                        constraints.append(f"""LOWER({full_fname}) LIKE '%{fval.replace("'", "").lower()}'""")
-                    case 'contains':  # String contains substring
-                        constraints.append(f"""{full_fname} LIKE BINARY '%{fval.replace("'", "")}%'""")
-                    case 'icontains':  # String contains substring case-insensitive
-                        constraints.append(f"""LOWER({full_fname}) LIKE '%{fval.replace("'", "").lower()}%'""")
-                    case 'range':  # Value lies in range from <a> to <b> aka BETWEEN
-                        constraints.append(f"{full_fname} BETWEEN {fval[0]} AND {fval[1]}")
-                    case 'year' | 'month' | 'day' | 'hour' | 'minute' | 'second':  # Comparing date\time\datetime parts
-                        constraints.append(f"{opname}({full_fname}) = {fval}")
-                    case 'isnull':  # Value is SQL NULL
-                        constraints.append(f"{opname}({full_fname}) IS {'NOT' if not fval else ''} NULL")
-                    case 'regex':  # Regular expression string comparison aka LIKE with regex
-                        constraints.append(f"{full_fname} LIKE {fval}")
-                    case 'in':  # Value belongs to tuple of values
-                        constraints.append(f"{full_fname} IN {fval}")
-        return {  # Assembling query
+                raise AttributeError(
+                    f'Wrong operation or model field '
+                    f'name specified: "{fnames[-1]}"'
+                )
+            constraints.append(ops[opname](
+                f'''{joins[-1]["alias"] if joins
+                else f"{model.table_name}0"}.{fnames[-1]}''', fval
+            ))
+        return {
             'joins': joins,
             'constraints': ' AND '.join(constraints)
         }
 
     @staticmethod
-    def make_order_by(
-        model,  # Allows to gain access to model resources
-        *args   # Field names and direction for ORDER BY command
-    ):
-        pass
+    def make_order_by(model, *args):  # Create list of fields for ORDER BY command
+        joins, fields = [], []
+        for query in args:
+            fnames = query.replace('-', '').split('__')  # "-" -> DESC / "" -> ASC
+            # Getting table names nested structure
+            current_model = model
+            for field in fnames:  # Using joins to specify subfields
+                if not field in current_model.fields:
+                    raise AttributeError(
+                        f'Wrong field "{field}" specified in '
+                        f'query for model {current_model.__name__}'
+                    )
+                else:
+                    try:  # Adding joins for ForeignKey and ManyToManyField
+                        attr = getattr(current_model, field)
+                        joins.extend(attr.get_joins(
+                            f'{current_model.table_name}'
+                            f'{Q.join_index - 1 if current_model != model else 0}',
+                            field, Q.join_index
+                        ))
+                        current_model = attr.ref
+                        Q.join_index += 1
+                    except AttributeError:
+                        break
+            fields.append(
+                f'''{joins[-1]["alias"] if joins
+                else f"{model.table_name}0"}.{fnames[-1]}'''
+            )
+        return {
+            'joins': joins,
+            'fields':fields
+        }
 
     def __init__(self, **kwargs):
         if len(kwargs) > 1:
-            raise Exception('Q class constructor argument must be a single kwarg')
+            raise ValueError(
+                'Q class constructor argument must be a single kwarg'
+            )
         self.query = kwargs
 
     def __or__(self, other):
@@ -271,22 +248,41 @@ def assemble_query(  # Making SQL query-string for given model with given parame
         model,       # Allows to gain access to model resources
         query: dict  # Dictionary storing query parameters
 ):
-    assembled = {'joins': [], 'constraints': [], 'orders': []}
-    for arg in query['args']:
+    joins, constraints = [], []
+    for arg in query['args']:  # Q-class queries (Q, Q.Not, Q.Or, Q.And)
         ass = arg.assemble_query(model)
-        assembled['joins'].extend(ass['joins'])
-        assembled['constraints'].append(f"({ass['constraints']})")
-    if query['kwargs']:
+        joins.extend(ass['joins'])
+        constraints.append(f"({ass['constraints']})")
+    if query['kwargs']:  # Keyword queries (<field>__<subfield>__...(__<op>)=<value>)
         ass = Q.make_query(model, **query['kwargs'])
-        assembled['joins'].extend(ass['joins'])
-        assembled['constraints'].append(f"({ass['constraints']})")
+        joins.extend(ass['joins'])
+        constraints.append(f"({ass['constraints']})")
+    if query.get('order_by', None):  # Specifying ORDER BY fields if listed
+        order_by = Q.make_order_by(model, *query['order_by'])
+        joins.extend(order_by['joins'])
     Q.join_index = 0
-    result =  ''.join(
-        assembled['joins']
-    ) + ' WHERE id > 0' + ' AND '.join(
-        assembled['constraints']
-    ) + (
-        f'ORDER BY {1}' if query.get('order_by', None) else ''
+    joins_unique, uniques, repeat = [], [], False
+    for join in joins:  # Making sure joins do not duplicate
+        if not join['field'] in uniques:
+            if repeat:  # Correcting on alias in first unique join after repeats
+                alias = join['on'].split('.')[0]
+                join['on'] = join['on'].replace(alias, next(filter(
+                    lambda j: j['table'] == alias[:-1],
+                    joins_unique
+                ))['alias'])
+            joins_unique.append(join)
+            uniques.append(join['field'])
+            repeat = False
+        else:  # Repeating joins sequence indicator
+            repeat = True
+    return ''.join(  # Assembling result
+        f" {j['type']} JOIN {j['table']} AS {j['alias']} ON {j['on']}" for j in joins_unique
+    ) + (' WHERE ' + ' AND '.join(
+        constraints
+    ) if constraints else '') + (
+        f''' ORDER BY {", ".join(  
+           f"{ob} {'ASC' if ob[0] != '-' else 'DESC'}" for ob in order_by['fields']
+        )}''' if query.get('order_by', None) else ''
     ) + (
         f' LIMIT {query["limit"]}' if query.get('limit', None) else ''
     ) + (

@@ -6,4 +6,5 @@ from orm.query import Q
 
 
 if __name__ == '__main__':
-    Flight.filter().order_by('-airline__name')
+    a = list(Airport.order_by('city', '-code', 'country', '-name'))
+    pass

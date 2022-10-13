@@ -94,6 +94,11 @@ class Model:
 
     @classmethod
     def check_table(cls):
+        for field in cls.fields.values():
+            if isinstance(field, fld.ForeignKey):
+                field.ref.check_table()
+            elif isinstance(field, fld.ManyToManyField):
+                field.m1 = cls
         try:  # Check if model table exists, create if not
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
@@ -124,7 +129,6 @@ class Model:
                     )
                     for field in self.fields.values():
                         if isinstance(field, fld.ManyToManyField):
-                            field.m1 = self  # Setting m1 model as current one
                             field.create()   # And creating necessary joint table
         except Error as err:
             print(err)
@@ -191,18 +195,24 @@ class Model:
 
     @classmethod
     def filter(cls, *args, **kwargs):  # Returns QuerySet of model instances matching query
+        cls.check_table()
         return cont.QuerySet(cls, {'args': args, 'kwargs': kwargs})
 
     @classmethod
     def get(cls, *args, **kwargs):
+        cls.check_table()
         try:  # Returns model instance matching query...
             return cls.filter(*args, **kwargs)[0]
         except IndexError:  # ... or None if nothing was found
             return None
 
+    @classmethod
+    def order_by(self, *args):  # *args format: '(-)<field>__<subfield>__...__<subfield>'
+        return self.filter().order_by(*args)
+
     @classmethod  # Drops database table associated with model
     def drop(cls):
-        cls.__check_table()
+        cls.check_table()
         try:  # DROP TABLE SQL command
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
@@ -212,7 +222,7 @@ class Model:
 
     @classmethod  # Describes database table
     def describe(cls):
-        cls.__check_table()
+        cls.check_table()
         try:  # DESCRIBE SQL command
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
@@ -240,7 +250,7 @@ class Model:
 
     @classmethod  # Simply executes query given
     def sql_query(cls, query: str):
-        cls.__check_table()
+        cls.check_table()
         try:
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:

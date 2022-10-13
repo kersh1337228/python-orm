@@ -130,17 +130,20 @@ class QuerySet:
                 try:  # SELECT EXISTS command with INNER JOIN
                     with connect(**db_data) as connection:
                         with connection.cursor() as cursor:
+                            assembled = qr.assemble_query(
+                                self.__model, self.__query
+                            )
+                            index = assembled.find('WHERE') + 6
                             cursor.execute(
                                 f"""SELECT EXISTS(SELECT * FROM {
                                 self.__model.table_name} AS {self.__model.table_name
                                 }0 INNER JOIN {self.__model.table_name} AS intersect ON {
                                 self.__model.table_name}0.id = intersect.id{
-                                qr.assemble_query(
-                                    self.__model, self.__query
-                                )} AND intersect.id = {item.id}{f' LIMIT {self.__query["limit"]}'
-                                if self.__query.get("limit", None) else ''}{
-                                f' OFFSET {self.__query["offset"]}'
-                                if self.__query.get("offset", None) else ''})"""
+                                assembled[:index] +
+                                f'intersect.id = {item.id} AND ' +
+                                assembled[index:]
+                                if index != 5 else f' WHERE intersect.id = {item.id}'
+                                })"""
                             )
                             results = cursor.fetchall()
                             return bool(results[0][0])
@@ -166,10 +169,7 @@ class QuerySet:
                             self.__model.table_name} AS {self.__model.table_name
                             }0{qr.assemble_query(
                                 self.__model, self.__query
-                            )}{f' LIMIT {self.__query["limit"]}'
-                            if self.__query.get("limit", None) else ''}{
-                            f' OFFSET {self.__query["offset"]}'
-                            if self.__query.get("offset", None) else ''}"""
+                            )}"""
                         )
                         results = cursor.fetchall()
                         return results[0][0]
@@ -216,11 +216,7 @@ class QuerySet:
                         self.__model.table_name} AS {self.__model.table_name}0{
                         qr.assemble_query(
                             self.__model, self.__query
-                        )}{f' LIMIT {self.__query["limit"]}'
-                        if self.__query.get("limit", None) else ''}{
-                        f' OFFSET {self.__query["offset"]}'
-                        if self.__query.get("offset", None) else ''
-                        }) AS __tab SET {', '.join(
+                        )}) AS __tab SET {', '.join(
                             update_set
                         )} WHERE {self.__model.table_name}.id = __tab.id"""
                     )
@@ -240,10 +236,7 @@ class QuerySet:
                         self.__model.table_name}) AS {self.__model.table_name}0{
                         qr.assemble_query(
                             self.__model, self.__query
-                        )}{f' LIMIT {self.__query["limit"]}'
-                        if self.__query.get("limit", None) else ''}{
-                        f' OFFSET {self.__query["offset"]}'
-                        if self.__query.get("offset", None) else ''})"""
+                        )})"""
                     )
                     connection.commit()
         except Error as err:
@@ -260,10 +253,7 @@ class QuerySet:
                             self.__model.table_name} AS {self.__model.table_name
                             }0{qr.assemble_query(
                                 self.__model, self.__query
-                            )}{f' LIMIT {self.__query["limit"]}'
-                            if self.__query.get("limit", None) else ''}{
-                            f' OFFSET {self.__query["offset"]}'
-                            if self.__query.get("offset", None) else ''})"""
+                            )})"""
                         )
                         results = cursor.fetchall()
                         return bool(results[0][0])
@@ -276,7 +266,7 @@ class QuerySet:
         for arg in args:
             if isinstance(arg, str):
                 subfs = arg.split('__')
-                if subfs[0].split('-')[1] in self.__model.fields:
+                if subfs[0].replace('-', '') in self.__model.fields:
                     pass
                 else:  # Check if model has field listed
                     raise AttributeError(
@@ -289,6 +279,7 @@ class QuerySet:
                     f' expected str but got {type(arg).__name__}'
                 )
         self.__query['order_by'] = args
+        return self
 
     def __bool__(self):
         return self.exists()

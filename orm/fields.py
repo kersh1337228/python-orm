@@ -218,7 +218,7 @@ SET_DEFAULT = 'SET DEFAULT'
 NO_ACTION = 'NO ACTION'
 
 
-class LinkField:  # Field to inherit from for table linking fields
+class LinkField(ABC):  # Field to inherit from for table linking fields
     def __init__(
             self,
             on_delete: str=NO_ACTION,
@@ -229,6 +229,10 @@ class LinkField:  # Field to inherit from for table linking fields
 
     def sql_init(self):
         return f""" ON DELETE {self._on_delete} ON UPDATE {self._on_update}"""
+
+    @abstractmethod
+    def get_joins(self, parent, field, id):
+        pass
 
 
 class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one relationships aka SQL FOREIGN KEY
@@ -260,6 +264,15 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
         return IntField.sql_init(self, name) + f""", FOREIGN KEY ({name
         }) REFERENCES {self.ref.table_name} (id)""" + LinkField.sql_init(self)
 
+    def get_joins(self, parent, field, id):
+        return {
+            'type': 'LEFT',
+            'table': self.ref.table_name,
+            'alias': f'{self.ref.table_name}{id}',
+            'on': f'{parent}.{field} = {self.ref.table_name}{id}.id',
+            'field': field
+        },
+
 
 class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-many relationships aka SQL TABLE m1_m2
     def __init__(
@@ -282,27 +295,43 @@ class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-
         self.__m1 = value
 
     @property
-    def m2 (self):
+    def ref (self):
         return self.__m2
 
     def sql_init(self, name: str):
         super().sql_init(name)
         return ''
 
+    def get_joins(self, parent, field, id):
+        return {
+            'type': 'RIGHT',
+            'table': f'{self.__m1.__name__}_{self.__m2.__name__}',
+            'alias': f'joint_table{id}',
+            'on': f'{parent}.id = joint_table{id}.{self.__m1.__name__.lower()}_id',
+            'field': f'{field}_joint'
+        }, {
+            'type': 'LEFT',
+            'table': self.__m2.table_name,
+            'alias': f'{self.__m2.table_name}{id}',
+            'on': f'joint_table{id}.{self.__m2.__name__.lower()}_id = {self.__m2.table_name}{id}.id',
+            'field': field
+        }
+
+
     def create(self):
         try:  # Creating junction table
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
                     cursor.execute(f'''CREATE TABLE IF NOT EXISTS {
-                    self.m1.__name__}_{self.m2.__name__} ({
-                    self.m1.__name__.lower()}_id int,
-                    FOREIGN KEY ({self.m1.__name__.lower()}_id) REFERENCES {
-                    self.m1.table_name} (id) ON DELETE CASCADE ON UPDATE CASCADE,
-                    {self.m2.__name__.lower()}_id int,
-                    FOREIGN KEY ({self.m2.__name__.lower()}_id) REFERENCES {
-                    self.m2.table_name} (id) {LinkField.sql_init(self)
+                    self.__m1.__name__}_{self.__m2.__name__} ({
+                    self.__m1.__name__.lower()}_id int,
+                    FOREIGN KEY ({self.__m1.__name__.lower()}_id) REFERENCES {
+                    self.__m1.table_name} (id) ON DELETE CASCADE ON UPDATE CASCADE,
+                    {self.__m2.__name__.lower()}_id int,
+                    FOREIGN KEY ({self.__m2.__name__.lower()}_id) REFERENCES {
+                    self.__m2.table_name} (id) {LinkField.sql_init(self)
                     }, CONSTRAINT unique_together UNIQUE ({
-                    self.m1.__name__.lower()}_id, {self.m2.__name__.lower()}_id)
+                    self.__m1.__name__.lower()}_id, {self.__m2.__name__.lower()}_id)
                     )''')
         except Error as err:
             print(err)
@@ -311,7 +340,7 @@ class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-
         try:  # Selecting rows from junction table
             with connect(**db_data) as connection:
                 with connection.cursor() as cursor:
-                    m1_name, m2_name = self.m1.__name__, self.m2.__name__
+                    m1_name, m2_name = self.__m1.__name__, self.__m2.__name__
                     cursor.execute(
                         f"""SELECT {m2_name.lower()}_id FROM {m1_name}_{m2_name} WHERE {
                         m1_name.lower()}_id = {m1_id}"""
@@ -327,7 +356,7 @@ class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-
         try:  # Inserting row into junction table
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
-                    m1_name, m2_name = self.m1.__name__, self.m2.__name__
+                    m1_name, m2_name = self.__m1.__name__, self.__m2.__name__
                     cursor.execute(
                         f'''INSERT INTO {m1_name}_{m2_name} ({
                         m1_name.lower()}_id, {m2_name.lower()
@@ -342,7 +371,7 @@ class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
                     cursor.execute(
-                        f'''DELETE FROM {self.m1.__name__}_{self.m2.__name__
+                        f'''DELETE FROM {self.__m1.__name__}_{self.__m2.__name__
                         } WHERE {self.m2.__name__.lower()}_id = {m2_id}'''
                     )
                     connection.commit()
