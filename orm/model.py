@@ -207,8 +207,12 @@ class Model:
             return None
 
     @classmethod
-    def order_by(self, *args):  # *args format: '(-)<field>__<subfield>__...__<subfield>'
-        return self.filter().order_by(*args)
+    def order_by(cls, *args):  # *args format: '(-)<field>__<subfield>__...__<subfield>'
+        return cls.filter().order_by(*args)
+
+    @classmethod
+    def aggregate(cls, *args):  # *args format Aggr('<field>__<subfield>__...__<subfield>')
+        return cls.filter().aggregate(*args)
 
     @classmethod  # Drops database table associated with model
     def drop(cls):

@@ -33,12 +33,12 @@ class Field(ABC):  # Basic model field class to inherit from
 
     def sql_init(self, name: str):  # Used in CREATE query to form column description
         self._name = name
-        return ' ' + ' '.join(
+        return ' ' + ' '.join((
             'UNIQUE' if self._unique else '',
             'NOT NULL' if not self._null else '',
             f'DEFAULT {self._default}' if self._default else '',
             f'CHECK ({name} IN {self._choices})' if self._choices else ''
-        )
+        ))
 
     @abstractmethod  # Used to transform python type to sql type
     def to_sql(self, value):
@@ -52,7 +52,7 @@ class Field(ABC):  # Basic model field class to inherit from
 class IntField(Field):  # Field to store int value aka SQL INTEGER
     def __init__(
             self,
-            default=None,
+            default: int=None,
             null: bool=True,
             unique: bool=False,
             choices: tuple[int]=()
@@ -69,7 +69,46 @@ class IntField(Field):  # Field to store int value aka SQL INTEGER
         return str(value) if isinstance(value, int) else value
 
     def from_sql(self, value: int):
-        self._validate_field_value(value)
+        return value
+
+
+class UnsignedIntField(IntField):  # Field to store unsigned int value aka SQL INTEGER UNSIGNED
+    def __init__(
+            self,
+            default: int=None,
+            null: bool=True,
+            unique: bool=False,
+            choices: tuple[int]=()
+    ):
+        super().__init__(
+            self.to_sql(default) if default else None,
+            null, unique, choices
+        )
+
+    def sql_init(self, name: str):
+        return f'{name} int unsigned' + super().sql_init(name)
+
+
+class FloatField(Field):  # Field to store float value aka SQL FLOAT
+    def __init__(
+            self,
+            default: float=None,
+            null: bool=True,
+            unique: bool=False,
+            choices: tuple[int]=()
+    ):
+        super().__init__(
+            int, self.to_sql(default) if default else None,
+            null, unique, choices
+        )
+
+    def sql_init(self, name: str):
+        return f'{name} float' + super().sql_init(name)
+
+    def to_sql(self, value: float | str):
+        return str(value) if isinstance(value, float) else value
+
+    def from_sql(self, value: int):
         return value
 
 
@@ -95,7 +134,6 @@ class CharField(Field):  # Field to store short string value aka SQL VARCHAR
         return f'\'{value}\'' if isinstance(value, str) else value
 
     def from_sql(self, value: str):
-        self._validate_field_value(value)
         return value
 
 
@@ -124,7 +162,7 @@ class TextField(Field):  # Field to store long string value aka SQL TEXT
 class DateTimeField(Field):  # Field to store datetime value aka SQL DATETIME
     def __init__(
             self,
-            default=None,
+            default: datetime.datetime=None,
             null: bool=True,
             unique: bool=False,
     ):
@@ -147,7 +185,7 @@ class DateTimeField(Field):  # Field to store datetime value aka SQL DATETIME
 class BooleanField(Field):  # Field to store bool value aka SQL BIT
     def __init__(
             self,
-            default=None,
+            default: bool=None,
             null: bool = True,
             unique: bool = False
     ):
@@ -169,7 +207,7 @@ class BooleanField(Field):  # Field to store bool value aka SQL BIT
 class JSONField(Field):  # Field to store dict value aka SQL JSON
     def __init__(
             self,
-            default=None,
+            default: dict=None,
             null: bool = True,
             unique: bool = False,
     ):
@@ -191,7 +229,7 @@ class JSONField(Field):  # Field to store dict value aka SQL JSON
 class DurationField(Field):  # Field to store timedelta value aka SQL INT
     def __init__(
             self,
-            default=None,
+            default: datetime.timedelta=None,
             null: bool = True,
             unique: bool = False
     ):
@@ -238,7 +276,7 @@ class LinkField(ABC):  # Field to inherit from for table linking fields
 class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one relationships aka SQL FOREIGN KEY
     def __init__(
             self,
-            ref,  # Reference model
+            ref: mdl.Model,  # Reference model
             null: bool = True,
             unique: bool = False,
             on_delete: str=NO_ACTION,
@@ -248,7 +286,7 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
         LinkField.__init__(self, on_delete, on_update)
         self.ref = ref
 
-    def to_sql(self, value: int):
+    def to_sql(self, value: mdl.ModelInstance):
         if self.ref != value.model:
             raise TypeError(
                 f'Wrong model type for ForeignKey: '
@@ -277,7 +315,7 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
 class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-many relationships aka SQL TABLE m1_m2
     def __init__(
             self,
-            ref,  # Reference model
+            ref: mdl.Model,  # Reference model
             on_delete: str = NO_ACTION,
             on_update: str = NO_ACTION
     ):

@@ -1,4 +1,4 @@
-from . import model as mod, fields as fld
+from . import fields as fld, aggregate as aggr
 from abc import ABC, abstractmethod
 
 
@@ -218,6 +218,36 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             'fields':fields
         }
 
+    @staticmethod
+    def make_aggregate(model, *args: tuple[aggr.BasicAggregate]):
+        joins, fields = [], []
+        for arg in args:
+            assembled = arg.assemble(model)
+            joins.extend(assembled['joins'])
+            fields.append(assembled['fields'])
+        return {
+            'joins': Q.make_joins_unique(joins),
+            'fields': fields
+        }
+
+    @staticmethod
+    def make_joins_unique(joins: iter):
+        joins_unique, uniques, repeat = [], [], False
+        for join in joins:  # Making sure joins do not duplicate
+            if not join['field'] in uniques:
+                if repeat:  # Correcting on alias in first unique join after repeats
+                    alias = join['on'].split('.')[0]
+                    join['on'] = join['on'].replace(alias, next(filter(
+                        lambda j: j['table'] == alias[:-1],
+                        joins_unique
+                    ))['alias'])
+                joins_unique.append(join)
+                uniques.append(join['field'])
+                repeat = False
+            else:  # Repeating joins sequence indicator
+                repeat = True
+        return joins_unique
+
     def __init__(self, **kwargs):
         if len(kwargs) > 1:
             raise ValueError(
@@ -245,10 +275,14 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
 
 
 def assemble_query(  # Making SQL query-string for given model with given parameters
-        model,       # Allows to gain access to model resources
-        query: dict  # Dictionary storing query parameters
+        model,  # Allows to gain access to model resources
+        query: dict,  # Dictionary storing query parameters
+        fields: tuple[str]=None,  # Fields list to select (optional)
+        validate_fields: bool=True  # Works only if fields argument specified
 ):
-    joins, constraints = [], []
+    # Initialising storages for JOIN, WHERE and ORDER BY
+    joins, constraints, order_by = [], [], []
+    # Assembling WHERE query
     for arg in query['args']:  # Q-class queries (Q, Q.Not, Q.Or, Q.And)
         ass = arg.assemble_query(model)
         joins.extend(ass['joins'])
@@ -257,26 +291,37 @@ def assemble_query(  # Making SQL query-string for given model with given parame
         ass = Q.make_query(model, **query['kwargs'])
         joins.extend(ass['joins'])
         constraints.append(f"({ass['constraints']})")
+    # Assembling ORDER BY query
     if query.get('order_by', None):  # Specifying ORDER BY fields if listed
         order_by = Q.make_order_by(model, *query['order_by'])
         joins.extend(order_by['joins'])
     Q.join_index = 0
-    joins_unique, uniques, repeat = [], [], False
-    for join in joins:  # Making sure joins do not duplicate
-        if not join['field'] in uniques:
-            if repeat:  # Correcting on alias in first unique join after repeats
-                alias = join['on'].split('.')[0]
-                join['on'] = join['on'].replace(alias, next(filter(
-                    lambda j: j['table'] == alias[:-1],
-                    joins_unique
-                ))['alias'])
-            joins_unique.append(join)
-            uniques.append(join['field'])
-            repeat = False
-        else:  # Repeating joins sequence indicator
-            repeat = True
-    return ''.join(  # Assembling result
-        f" {j['type']} JOIN {j['table']} AS {j['alias']} ON {j['on']}" for j in joins_unique
+    # What fields to select
+    if query.get('aggregate_fields', None):
+        aggregate = Q.make_aggregate(*query.get('aggregate_fields'))
+        joins.extend(aggregate['joins'])
+        flist = ', '.join(aggregate['fields'])
+    elif fields:  # No validation - can result in SQL error!!!
+        if validate_fields:  # If true allows only primary model fields
+            if not all(map(lambda f: f in model.fields, fields)):
+                raise AttributeError(
+                    'Only primary model fields could be '
+                    'specified in assemble_query() method.'
+                )
+            flist = ', '.join(f'{model.table_name}0.{f}' for f in fields)
+        else:  # No validation - SQL errors could be raised
+            flist = ', '.join(fields)
+    else:
+        flist = ', '.join(
+            f'{model.table_name}0.{fname}'
+            for fname, fval in
+            model.fields.items()
+            if not isinstance(fval, fld.ManyToManyField)
+        )
+    return f"""SELECT {flist} FROM {model.table_name} AS {
+    model.table_name}0{''.join(
+        f" {j['type']} JOIN {j['table']} AS {j['alias']} ON {j['on']}"
+        for j in Q.make_joins_unique(joins)
     ) + (' WHERE ' + ' AND '.join(
         constraints
     ) if constraints else '') + (
@@ -287,4 +332,4 @@ def assemble_query(  # Making SQL query-string for given model with given parame
         f' LIMIT {query["limit"]}' if query.get('limit', None) else ''
     ) + (
         f' OFFSET {query["offset"]}' if query.get('offset', None) else ''
-    )
+    )}"""

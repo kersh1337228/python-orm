@@ -1,6 +1,7 @@
 from mysql.connector import connect, Error
 from settings import db_data
 from . import fields as fld, model as mdl, query as qr
+from .aggregate import BasicAggregate
 
 
 class QuerySet:
@@ -32,7 +33,10 @@ class QuerySet:
                     self.__query_set._QuerySet__exec()
                 return self.__query_set[key]
             else:
-                raise TypeError('QuerySetSlice __getitem__() method supports only int and slice argument types')
+                raise TypeError(
+                    'QuerySetSlice __getitem__() method supports '
+                    'only int and slice argument types'
+                )
 
         def __str__(self) -> str:
             return f'<QuerySetSlice({self.__query_set.__str__()})>'
@@ -60,15 +64,7 @@ class QuerySet:
                 with connection.cursor(dictionary=True) as cursor:
                     cursor.execute(
                         ' UNION '.join(
-                            f"""SELECT {', '.join(
-                                f'{self.__model.table_name}0.{fname}'
-                                for fname, fval in
-                                self.__model.fields.items()
-                                if not isinstance(fval, fld.ManyToManyField)
-                            )} FROM {self.__model.table_name} AS {
-                            self.__model.table_name}0{qr.assemble_query(
-                                self.__model, q
-                            )}"""
+                            qr.assemble_query(self.__model, q)
                             for q in [self.__query] + self.__union
                         )
                     )
@@ -114,7 +110,10 @@ class QuerySet:
             else:
                 return self.__container[key]
         else:
-            raise TypeError('QuerySet __getitem__() method supports only int and slice argument types.')
+            raise TypeError(
+                'QuerySet __getitem__() method supports '
+                'only int and slice argument types.'
+            )
 
     def __contains__(self, item):
         if not issubclass(type(item), mdl.ModelInstance):
@@ -134,6 +133,17 @@ class QuerySet:
                                 self.__model, self.__query
                             )
                             index = assembled.find('WHERE') + 6
+                            cursor.execute(
+                                f"""SELECT EXISTS(SELECT * FROM {
+                                self.__model.table_name} AS {self.__model.table_name
+                                }0 INNER JOIN {self.__model.table_name} AS intersect ON {
+                                self.__model.table_name}0.id = intersect.id{
+                                assembled[:index] +
+                                f'intersect.id = {item.id} AND ' +
+                                assembled[index:]
+                                if index != 5 else f' WHERE intersect.id = {item.id}'
+                                })"""
+                            )
                             cursor.execute(
                                 f"""SELECT EXISTS(SELECT * FROM {
                                 self.__model.table_name} AS {self.__model.table_name
@@ -165,11 +175,12 @@ class QuerySet:
                 with connect(**db_data) as connection:
                     with connection.cursor() as cursor:
                         cursor.execute(
-                            f"""SELECT COUNT(*) FROM {
-                            self.__model.table_name} AS {self.__model.table_name
-                            }0{qr.assemble_query(
-                                self.__model, self.__query
-                            )}"""
+                            qr.assemble_query(
+                                model=self.__model,
+                                query=self.__query,
+                                fields=('COUNT(*)',),
+                                validate_fields=False
+                            )
                         )
                         results = cursor.fetchall()
                         return results[0][0]
@@ -178,23 +189,41 @@ class QuerySet:
         else:
             return len(self.__container)
 
-    def filter(self, *args, **kwargs):
+    def filter(self, *args, **kwargs):  # SELECT WHERE ...
         self.__executed = False
         self.__query['args'] += args
         self.__query['kwargs'].update(kwargs)
         return self
 
-    def get(self, *args, **kwargs):
+    def get(self, *args, **kwargs): # SELECT WHERE ... LIMIT 1
         try:  # Returns model instance matching query...
             return self.filter(*args, **kwargs)[0]
         except IndexError:  # ... or None if nothing was found
             return None
 
-    def exclude(self, *args, **kwargs):
+    def exclude(self, *args, **kwargs):  # SELECT WHERE NOT ...
         self.__executed = False
         self.__query['args'] += (~qr.Q.And(
-            *(args + [qr.Q(**{name: val}) for name, val in kwargs.items()])
+            *(args + tuple(qr.Q(**{name: val}) for name, val in kwargs.items()))
         ),)
+        return self
+
+    def aggregate(self, *args):  # SELECT Aggr(...), ... command
+        if len(args) > 0:  # Check if is enough arguments
+            if not all(map(lambda arg: issubclass(type(arg), BasicAggregate), args)):
+                raise TypeError(  # Check if arguments specified are Aggregate wrappers
+                    'Expected BasicAggregate subclass '
+                    'instances as args values.'
+                )
+            self.__executed = False
+            try:  # Check if key is specified
+                self.__query['aggregate_fields'] += args
+            except KeyError:
+                self.__query['aggregate_fields'] = args
+        else:
+            raise ValueError(
+                'At least one argument required'
+            )
         return self
 
     def update(self, **kwargs) -> None:  # Updating all the QuerySet members according to the kwargs given
@@ -211,12 +240,9 @@ class QuerySet:
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
                     cursor.execute(
-                        f"""UPDATE {self.__model.table_name}, (SELECT {
-                        self.__model.table_name}0.id FROM {
-                        self.__model.table_name} AS {self.__model.table_name}0{
-                        qr.assemble_query(
-                            self.__model, self.__query
-                        )}) AS __tab SET {', '.join(
+                        f"""UPDATE {self.__model.table_name}, ({
+                        qr.assemble_query(self.__model, self.__query, ('id',))
+                        }) AS __tab SET {', '.join(
                             update_set
                         )} WHERE {self.__model.table_name}.id = __tab.id"""
                     )
@@ -232,10 +258,12 @@ class QuerySet:
                     cursor.execute(
                         f"""DELETE FROM {self.__model.table_name} WHERE {
                         self.__model.table_name}.id IN (SELECT {
-                        self.__model.table_name}0.id FROM (SELECT * FROM {
-                        self.__model.table_name}) AS {self.__model.table_name}0{
+                        self.__model.table_name}0.id FROM ({
                         qr.assemble_query(
-                            self.__model, self.__query
+                            model=self.__model,
+                            query=self.__query,
+                            fields=('*',),
+                            validate_fields=False
                         )})"""
                     )
                     connection.commit()
@@ -249,10 +277,12 @@ class QuerySet:
                 with connect(**db_data) as connection:
                     with connection.cursor() as cursor:
                         cursor.execute(
-                            f"""SELECT EXISTS(SELECT * FROM {
-                            self.__model.table_name} AS {self.__model.table_name
-                            }0{qr.assemble_query(
-                                self.__model, self.__query
+                            f"""SELECT EXISTS({
+                            qr.assemble_query(
+                                model=self.__model,
+                                query=self.__query,
+                                fields=('*',),
+                                validate_fields=False
                             )})"""
                         )
                         results = cursor.fetchall()

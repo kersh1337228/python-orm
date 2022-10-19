@@ -10,7 +10,8 @@ class Airport(model.Model):
 
 class Plane(model.Model):
     name = fields.CharField(null=False, unique=True)
-    capacity = fields.JSONField(null=False)
+    economy_capacity = fields.UnsignedIntField(null=False)
+    business_capacity = fields.UnsignedIntField()
 
 
 class Airline(model.Model):
@@ -29,5 +30,7 @@ class Route(model.Model):
 
 class Flight(model.Model):
     routes = fields.ManyToManyField(ref=Route)
-    costs = fields.JSONField(null=False)
+    economy_price = fields.FloatField()
+    business_price = fields.FloatField()
+    currency = fields.CharField(size=3, default='USD', null=False)
     airline = fields.ForeignKey(ref=Airline, null=False, on_delete=fields.CASCADE)
