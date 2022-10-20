@@ -296,7 +296,7 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
             return str(value.id)
 
     def from_sql(self, value: str):
-        return self.ref.get(id=value)
+        return ForeignKeyInstance(self, value)
 
     def sql_init(self, name: str):
         return IntField.sql_init(self, name) + f""", FOREIGN KEY ({name
@@ -310,6 +310,31 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
             'on': f'{parent}.{field} = {self.ref.table_name}{id}.id',
             'field': field
         },
+
+
+class ForeignKeyInstance:  # Wrapper to work with ForeignKey field using model instance
+    def __init__(self, fk: ForeignKey, id: int):
+        self.__fk = fk
+        self.__id = id
+        self.__ref = None
+
+    def __getattr__(self, item):  # Nested model fields access
+        if not self.__ref:  # Make lazy database select
+            self.__ref = self.__fk.ref.get(id=self.__id)
+        return getattr(self.__ref, item)
+
+    def __setattr__(self, key, value):
+        if key in (  # Attributes used inside class
+                '_ForeignKeyInstance__fk',
+                '_ForeignKeyInstance__id',
+                '_ForeignKeyInstance__ref'
+        ):
+            super().__setattr__(key, value)
+        else:  # No attribute assign from out of class
+            raise AttributeError(
+                'ForeignKey field nested '
+                'model could not be altered.'
+            )
 
 
 class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-many relationships aka SQL TABLE m1_m2
@@ -383,7 +408,7 @@ class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-
                         f"""SELECT {m2_name.lower()}_id FROM {m1_name}_{m2_name} WHERE {
                         m1_name.lower()}_id = {m1_id}"""
                     )
-                    return cont.QuerySet(self.m2, {
+                    return cont.QuerySet(self.__m2, {
                         'args': (),
                         'kwargs': {'id__in': tuple(chain(*cursor.fetchall()))}
                     })

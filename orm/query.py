@@ -3,7 +3,7 @@ from abc import ABC, abstractmethod
 
 
 class BaseOperation(ABC):  # Database operation interface
-    @abstractmethod  # Assembling inner Q, Not, And, Or objects into SQL string
+    @abstractmethod  # Assembling inner Q, Not, And, Or objects into an SQL string
     def assemble_query(self, model):
         pass
 
@@ -28,7 +28,7 @@ class BaseOperation(ABC):  # Database operation interface
         pass
 
 
-ops = {  # SQL operations used in WHERE constraints
+ops = {  # SQL operations used in WHERE statement
     '': lambda name, val: f'''{name} = {val}''',
     'gt': lambda name, val: f'''{name} > {val}''',
     'gte': lambda name, val: f'''{name} >= {val}''',
@@ -139,39 +139,21 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             assembled['constraints'] = 'NOT (' + assembled['constraints'] + ')'
             return assembled
 
-    join_index = 1
+    join_index = 1  # Static variable used in joins to make sure all tables alias are unique
 
-    @staticmethod
-    def make_query(model, **kwargs):  # Create SQL-query string from keyword one
+    @staticmethod  # Create SQL-query string from keyword one
+    def make_query(model, **kwargs):
         joins, constraints = [], []
         for query, value in kwargs.items():
             parts = query.split('__')
             opname = parts[-1] if parts[-1] in ops else ''
             fnames = parts[:-1] if opname else parts
-            # Getting table names nested structure
-            current_model = model
-            for field in fnames:  # Using joins to specify subfield constraints
-                if not field in current_model.fields:
-                    raise AttributeError(
-                        f'Wrong field "{field}" specified in '
-                        f'query for model {current_model.__name__}'
-                    )
-                else:
-                    try:  # Adding joins for ForeignKey and ManyToManyField
-                        attr = getattr(current_model, field)
-                        joins.extend(attr.get_joins(
-                            f'{current_model.table_name}'
-                            f'{Q.join_index - 1 if current_model != model else 0}',
-                            field, Q.join_index
-                        ))
-                        current_model = attr.ref
-                        Q.join_index += 1
-                    except AttributeError:
-                        break
-            if fnames[-1] in current_model.fields:  # Reformatting value given into SQL-friendly one
+            joins_extend, current_model = Q.make_joins(model, fnames)
+            joins.extend(joins_extend)  # Extending joins for nested fields
+            if fnames[-1] in current_model.fields:  # Reformatting value given into an SQL-friendly one
                 fval = current_model.fields.get(fnames[-1]).to_sql(value)
-            else:
-                raise AttributeError(
+            else:  # Last subfield specified in query was either not in operations available list
+                raise AttributeError(  # or not in model fields list
                     f'Wrong operation or model field '
                     f'name specified: "{fnames[-1]}"'
                 )
@@ -184,53 +166,58 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             'constraints': ' AND '.join(constraints)
         }
 
-    @staticmethod
-    def make_order_by(model, *args):  # Create list of fields for ORDER BY command
+    @staticmethod  # Create list of fields for ORDER BY command
+    def make_order_by(model, *args):
         joins, fields = [], []
         for query in args:
             fnames = query.replace('-', '').split('__')  # "-" -> DESC / "" -> ASC
-            # Getting table names nested structure
-            current_model = model
-            for field in fnames:  # Using joins to specify subfields
-                if not field in current_model.fields:
-                    raise AttributeError(
-                        f'Wrong field "{field}" specified in '
-                        f'query for model {current_model.__name__}'
-                    )
-                else:
-                    try:  # Adding joins for ForeignKey and ManyToManyField
-                        attr = getattr(current_model, field)
-                        joins.extend(attr.get_joins(
-                            f'{current_model.table_name}'
-                            f'{Q.join_index - 1 if current_model != model else 0}',
-                            field, Q.join_index
-                        ))
-                        current_model = attr.ref
-                        Q.join_index += 1
-                    except AttributeError:
-                        break
+            joins.extend(Q.make_joins(model, fnames)[0])  # Extending joins for nested fields
             fields.append(
                 f'''{joins[-1]["alias"] if joins
-                else f"{model.table_name}0"}.{fnames[-1]}'''
+                else f"{model.table_name}0"}.{fnames[-1]} {
+                " DESC" if query[0] == "-" else " ASC"}'''
             )
         return {
             'joins': joins,
             'fields':fields
         }
 
-    @staticmethod
-    def make_aggregate(model, *args: tuple[aggr.BasicAggregate]):
+    @staticmethod  # Assembling query with aggregate functions in fields list
+    def make_aggregate(model: object, *args: tuple[aggr.BasicAggregate]) -> dict:
         joins, fields = [], []
-        for arg in args:
-            assembled = arg.assemble(model)
+        for aggregate in args:
+            assembled = aggregate(model)  # BasicAggregate class __call__() method
             joins.extend(assembled['joins'])
             fields.append(assembled['fields'])
         return {
-            'joins': Q.make_joins_unique(joins),
+            'joins': joins,
             'fields': fields
         }
 
-    @staticmethod
+    @staticmethod  # Table joins for nested fields
+    def make_joins(model: object, fnames: list[str]) -> tuple[tuple, object]:
+        current_model, joins = model, ()
+        for field in fnames:  # Using joins to specify subfield constraints
+            if not field in current_model.fields:
+                raise AttributeError(
+                    f'Wrong field "{field}" specified in '
+                    f'query for model {current_model.__name__}'
+                )
+            else:
+                try:  # Adding joins for ForeignKey and ManyToManyField
+                    attr = getattr(current_model, field)
+                    joins += (attr.get_joins(
+                        f'{current_model.table_name}'
+                        f'{Q.join_index - 1 if current_model != model else 0}',
+                        field, Q.join_index
+                    ))
+                    current_model = attr.ref
+                    Q.join_index += 1
+                except AttributeError:
+                    break
+        return joins, current_model
+
+    @staticmethod  # Eliminates joins duplication (DEPRECATED)
     def make_joins_unique(joins: iter):
         joins_unique, uniques, repeat = [], [], False
         for join in joins:  # Making sure joins do not duplicate
@@ -277,11 +264,12 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
 def assemble_query(  # Making SQL query-string for given model with given parameters
         model,  # Allows to gain access to model resources
         query: dict,  # Dictionary storing query parameters
-        fields: tuple[str]=None,  # Fields list to select (optional)
+        fields: tuple[str]=None,  # Non-aggregate fields list to select (optional)
+        aggregate_fields: tuple[str]=None,  # Aggregate fields list to select (optional)
         validate_fields: bool=True  # Works only if fields argument specified
 ):
     # Initialising storages for JOIN, WHERE and ORDER BY
-    joins, constraints, order_by = [], [], []
+    joins, constraints, order_by = [], [], ''
     # Assembling WHERE query
     for arg in query['args']:  # Q-class queries (Q, Q.Not, Q.Or, Q.And)
         ass = arg.assemble_query(model)
@@ -295,40 +283,37 @@ def assemble_query(  # Making SQL query-string for given model with given parame
     if query.get('order_by', None):  # Specifying ORDER BY fields if listed
         order_by = Q.make_order_by(model, *query['order_by'])
         joins.extend(order_by['joins'])
-    Q.join_index = 0
-    # What fields to select
-    if query.get('aggregate_fields', None):
-        aggregate = Q.make_aggregate(*query.get('aggregate_fields'))
-        joins.extend(aggregate['joins'])
-        flist = ', '.join(aggregate['fields'])
-    elif fields:  # No validation - can result in SQL error!!!
+        order_by = f''' ORDER BY {", ".join(order_by['fields'])}'''
+    # Assembling field list to select from database
+    if fields:  # Manually specified field names
         if validate_fields:  # If true allows only primary model fields
             if not all(map(lambda f: f in model.fields, fields)):
                 raise AttributeError(
                     'Only primary model fields could be '
-                    'specified in assemble_query() method.'
+                    'specified in assemble_query() method '
+                    'when validate_fields parameter is set to "True".'
                 )
             flist = ', '.join(f'{model.table_name}0.{f}' for f in fields)
         else:  # No validation - SQL errors could be raised
             flist = ', '.join(fields)
-    else:
+    elif aggregate_fields:  # Fields wrapped in aggregate functions
+        aggregate = Q.make_aggregate(model, *aggregate_fields)
+        joins.extend(aggregate['joins'])
+        flist = ', '.join(aggregate['fields'])
+    else:  # All primary model fields available (except ManyToManyField)
         flist = ', '.join(
             f'{model.table_name}0.{fname}'
             for fname, fval in
             model.fields.items()
             if not isinstance(fval, fld.ManyToManyField)
         )
+    Q.join_index = 0  # Setting static join index to initial value
+    # Assembling SQL query
     return f"""SELECT {flist} FROM {model.table_name} AS {
     model.table_name}0{''.join(
         f" {j['type']} JOIN {j['table']} AS {j['alias']} ON {j['on']}"
-        for j in Q.make_joins_unique(joins)
-    ) + (' WHERE ' + ' AND '.join(
-        constraints
-    ) if constraints else '') + (
-        f''' ORDER BY {", ".join(  
-           f"{ob} {'ASC' if ob[0] != '-' else 'DESC'}" for ob in order_by['fields']
-        )}''' if query.get('order_by', None) else ''
-    ) + (
+        for j in joins
+    ) + (' WHERE ' + ' AND '.join(constraints) if constraints else '') + order_by + (
         f' LIMIT {query["limit"]}' if query.get('limit', None) else ''
     ) + (
         f' OFFSET {query["offset"]}' if query.get('offset', None) else ''

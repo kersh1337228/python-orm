@@ -75,21 +75,21 @@ class Model:
 
     @classmethod
     @property
-    def fields(cls):
-        try:  # Return dict with model field names and Field-class types
+    def fields(cls):  # Returns dict with model field names and Field-class types
+        try:  # If already filled
             return cls.__fields
-        except AttributeError:
-            fields = {'id': fld.IntField(null=False, unique=True)}
-            for name in dir(cls):
+        except AttributeError:  # Getting model fields
+            fields = {'id': fld.IntField(null=False, unique=True)}  # Adding id field not to get false error during validation
+            for name in dir(cls):  # All class attributes iteration
                 try:
-                    if name == 'fields':
+                    if name == 'fields':  # Ignoring fields attribute not to get infinite recursion
                         raise AttributeError
                     attr = getattr(cls, name)
-                    if issubclass(type(attr), fld.Field):
+                    if issubclass(type(attr), fld.Field):  # Only Field subclasses are taken into consideration
                         fields[name] = attr
-                except:
+                except AttributeError:
                     continue
-            cls.__fields = fields
+            cls.__fields = fields  # Assigning property
             return fields
 
     @classmethod

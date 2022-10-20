@@ -1,4 +1,4 @@
-from . import query as qr
+from . import query as qr, fields as fld
 
 
 class BasicAggregate:  # Base wrapper for SQL aggregate functions
@@ -11,33 +11,14 @@ class BasicAggregate:  # Base wrapper for SQL aggregate functions
             self.field_name = field_name
             self.function = function
 
-    def assemble(self, model):  # Adding joins and SQL
-        joins = []
+    def __call__(self, model):  # Adding joins and SQL
         fnames = self.field_name.replace('-', '').split('__')
-        # Getting table names nested structure
-        current_model = model
-        for field in fnames:  # Using joins to specify subfields
-            if not field in current_model.fields:
-                raise AttributeError(
-                    f'Wrong field "{field}" specified in '
-                    f'query for model {current_model.__name__}'
-                )
-            else:
-                try:  # Adding joins for ForeignKey and ManyToManyField
-                    attr = getattr(current_model, field)
-                    joins.extend(attr.get_joins(
-                        f'{current_model.table_name}'
-                        f'{qr.Q.join_index - 1 if current_model != model else 0}',
-                        field, qr.Q.join_index
-                    ))
-                    current_model = attr.ref
-                    qr.Q.join_index += 1
-                except AttributeError:
-                    break
+        joins, current_model = qr.Q.make_joins(model, fnames)
         return {
             'joins': joins,
             'fields': f'''{self.function}({joins[-1]["alias"] if joins
-            else f"{model.table_name}0"}.{fnames[-1]})'''
+            else f"{model.table_name}0"}.{fnames[-1]}) AS {
+            self.field_name}__{self.function.lower()}'''
         }
 
 
@@ -59,6 +40,16 @@ class Avg(BasicAggregate):
 class Count(BasicAggregate):
     def __init__(self, field_name: str):
         super().__init__(field_name, 'COUNT')
+
+    def __call__(self, model):  # BasicAggregate method override to work properly with ManyToManyField
+        fnames = self.field_name.replace('-', '').split('__')
+        joins, current_model = qr.Q.make_joins(model, fnames)
+        return {
+            'joins': joins,
+            'fields': f'''COUNT(*) AS {
+            self.field_name}__{self.function.lower()}'''
+        }
+
 
 
 class Sum(BasicAggregate):

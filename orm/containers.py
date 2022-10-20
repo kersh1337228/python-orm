@@ -53,12 +53,13 @@ class QuerySet:
     def __init__(self, model, query):
         self.__model = model
         self.__query = query
+        self.__query['order_by'] = []
         self.__union = []
         self.__executed = False
-        self.__container = tuple()
+        self.__container = ()
 
     def __exec(self) -> None:  # Lazy query execution
-        self.__model.check_table()
+        self.__model.check_table()  # Check if necessary table exists
         try:  # SELECT command
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
@@ -93,8 +94,11 @@ class QuerySet:
                 self.__exec()
                 return self.__container[0]
         elif isinstance(key, slice):
-            if not self.__executed:
-                if all((key.start, key.stop, key.start >= 0, key.stop > key.start)):
+            if not self.__executed:  # If container is empty then altering query
+                if not key.start and not key.stop and key.step == -1:
+                    self.__query['order_by'].append('-id')
+                    return self
+                elif key.start and key.stop and 0 <= key.start < key.stop:
                     match key.start, key.stop:
                         case start, None:
                             self.__query['offset'] = start
@@ -104,7 +108,7 @@ class QuerySet:
                             self.__query['offset'] = start
                             self.__query['limit'] = stop - start
                     return QuerySet.__QuerySetSlice(self)
-                else:
+                else:  # If no SQL-convert found just making query
                     self.__exec()
                     return self.__container[key]
             else:
@@ -130,29 +134,19 @@ class QuerySet:
                     with connect(**db_data) as connection:
                         with connection.cursor() as cursor:
                             assembled = qr.assemble_query(
-                                self.__model, self.__query
+                                model=self.__model,
+                                query=self.__query,
+                                fields=('*',),
+                                validate_fields=False
                             )
-                            index = assembled.find('WHERE') + 6
+                            index = assembled.find('WHERE')  # Splitting by WHERE keyword to insert additional INNER JOIN
                             cursor.execute(
-                                f"""SELECT EXISTS(SELECT * FROM {
-                                self.__model.table_name} AS {self.__model.table_name
-                                }0 INNER JOIN {self.__model.table_name} AS intersect ON {
-                                self.__model.table_name}0.id = intersect.id{
-                                assembled[:index] +
-                                f'intersect.id = {item.id} AND ' +
-                                assembled[index:]
-                                if index != 5 else f' WHERE intersect.id = {item.id}'
-                                })"""
-                            )
-                            cursor.execute(
-                                f"""SELECT EXISTS(SELECT * FROM {
-                                self.__model.table_name} AS {self.__model.table_name
-                                }0 INNER JOIN {self.__model.table_name} AS intersect ON {
-                                self.__model.table_name}0.id = intersect.id{
-                                assembled[:index] +
-                                f'intersect.id = {item.id} AND ' +
-                                assembled[index:]
-                                if index != 5 else f' WHERE intersect.id = {item.id}'
+                                f"""SELECT EXISTS({assembled[:index] 
+                                if index > 0 else assembled} INNER JOIN {
+                                self.__model.table_name} AS intersect ON {
+                                self.__model.table_name}0.id = intersect.id {
+                                assembled[index:] + f' AND intersect.id = {item.id}'
+                                if index > 0 else f' WHERE intersect.id = {item.id}'
                                 })"""
                             )
                             results = cursor.fetchall()
@@ -191,6 +185,7 @@ class QuerySet:
 
     def filter(self, *args, **kwargs):  # SELECT WHERE ...
         self.__executed = False
+        self.__container = ()
         self.__query['args'] += args
         self.__query['kwargs'].update(kwargs)
         return self
@@ -203,6 +198,7 @@ class QuerySet:
 
     def exclude(self, *args, **kwargs):  # SELECT WHERE NOT ...
         self.__executed = False
+        self.__container = ()
         self.__query['args'] += (~qr.Q.And(
             *(args + tuple(qr.Q(**{name: val}) for name, val in kwargs.items()))
         ),)
@@ -213,18 +209,27 @@ class QuerySet:
             if not all(map(lambda arg: issubclass(type(arg), BasicAggregate), args)):
                 raise TypeError(  # Check if arguments specified are Aggregate wrappers
                     'Expected BasicAggregate subclass '
-                    'instances as args values.'
+                    'instances as args values for aggregate() method.'
                 )
-            self.__executed = False
-            try:  # Check if key is specified
-                self.__query['aggregate_fields'] += args
-            except KeyError:
-                self.__query['aggregate_fields'] = args
+            try:  # SELECT command
+                with connect(**db_data) as connection:
+                    with connection.cursor(dictionary=True) as cursor:
+                        cursor.execute(
+                            qr.assemble_query(
+                                model=self.__model,
+                                query=self.__query,
+                                aggregate_fields=args
+                            )
+                        )
+                        result = cursor.fetchall()
+                        return result
+            except Error as err:
+                print(err)
         else:
             raise ValueError(
-                'At least one argument required'
+                'At least one argument '
+                'required for aggregate() method.'
             )
-        return self
 
     def update(self, **kwargs) -> None:  # Updating all the QuerySet members according to the kwargs given
         self.__model.check_table()
@@ -305,10 +310,10 @@ class QuerySet:
                     )
             else:  # Check if all order_by parameters are strings
                 raise TypeError(
-                    f'Wrong argument type for order_by method:'
+                    f'Wrong argument type for order_by() method:'
                     f' expected str but got {type(arg).__name__}'
                 )
-        self.__query['order_by'] = args
+        self.__query['order_by'].extend(args)
         return self
 
     def __bool__(self):
@@ -319,6 +324,7 @@ class QuerySet:
             raise TypeError('QuerySet models must be the same to perform UNION operation')
         else:
             self.__executed = False
+            self.__container = ()
             self.__union.append(other.__query)
             return self
 
@@ -330,6 +336,7 @@ class QuerySet:
             raise TypeError('QuerySet models must be the same to perform OR operation')
         else:
             self.__executed = False
+            self.__container = ()
             return QuerySet(self.__model, {
                 'args': qr.Q.Or(
                     qr.Q.And(*(self.__query['args'] + tuple(
@@ -352,6 +359,7 @@ class QuerySet:
             raise TypeError('QuerySet models must be the same to perform AND operation')
         else:
             self.__executed = False
+            self.__container = ()
             self.__query['kwargs'].update(other.__query['kwargs'])
             return QuerySet(self.__model, {
                 'args': self.__query['args'] + other.__query['args'],
