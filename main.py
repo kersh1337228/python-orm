@@ -7,5 +7,15 @@ from orm.aggregate import *
 
 
 if __name__ == '__main__':
-    rs = Flight.filter(id=7).aggregate(Count('routes'))
-    pass
+    s = time.perf_counter()
+    a = list(Order.filter(
+        ticket__flight__routes__plane__name__istartswith='airbus'
+    ).annotate(
+        price_formula=Max('ticket__flight__economy_price') //
+                      Min('ticket__flight__economy_price') -
+                      Avg('ticket__flight__economy_price') *
+                      Sum('ticket__flight__economy_price')
+    ).order_by(
+        '-price_formula'
+    ))
+    print(time.perf_counter() - s)

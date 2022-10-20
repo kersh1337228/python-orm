@@ -269,7 +269,13 @@ class LinkField(ABC):  # Field to inherit from for table linking fields
         return f""" ON DELETE {self._on_delete} ON UPDATE {self._on_update}"""
 
     @abstractmethod
-    def get_joins(self, parent, field, id):
+    def get_joins(  # Get data to assemble SQL JOIN in primary SELECT query
+            self,
+            parent: str,  # Outer table
+            field: str,  # Field name
+            primary_join_index: int,  # Join unique identifier for regular SELECT
+            annotate_join_index: int  # Join unique identifier for annotated fields
+    ):
         pass
 
 
@@ -302,12 +308,22 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
         return IntField.sql_init(self, name) + f""", FOREIGN KEY ({name
         }) REFERENCES {self.ref.table_name} (id)""" + LinkField.sql_init(self)
 
-    def get_joins(self, parent, field, id):
+    def get_joins(
+            self,
+            parent: str,
+            field: str,
+            primary_join_index: int,
+            annotate_join_index: int
+    ):
         return {
             'type': 'LEFT',
             'table': self.ref.table_name,
-            'alias': f'{self.ref.table_name}{id}',
-            'on': f'{parent}.{field} = {self.ref.table_name}{id}.id',
+            'alias': f'{self.ref.table_name}'
+                     f'{primary_join_index}'
+                     f'{annotate_join_index}',
+            'on': f'{parent}.{field} = {self.ref.table_name}'
+                  f'{primary_join_index}'
+                  f'{annotate_join_index}.id',
             'field': field
         },
 
@@ -365,18 +381,31 @@ class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-
         super().sql_init(name)
         return ''
 
-    def get_joins(self, parent, field, id):
+    def get_joins(
+            self,
+            parent: str,
+            field: str,
+            primary_join_index: int,
+            annotate_join_index: int
+    ):
         return {
-            'type': 'RIGHT',
+            'type': 'LEFT',
             'table': f'{self.__m1.__name__}_{self.__m2.__name__}',
-            'alias': f'joint_table{id}',
-            'on': f'{parent}.id = joint_table{id}.{self.__m1.__name__.lower()}_id',
+            'alias': f'joint_table{primary_join_index}'
+                     f'{annotate_join_index}',
+            'on': f'{parent}.id = joint_table{primary_join_index}'
+                  f'{annotate_join_index}.{self.__m1.__name__.lower()}_id',
             'field': f'{field}_joint'
         }, {
             'type': 'LEFT',
             'table': self.__m2.table_name,
-            'alias': f'{self.__m2.table_name}{id}',
-            'on': f'joint_table{id}.{self.__m2.__name__.lower()}_id = {self.__m2.table_name}{id}.id',
+            'alias': f'{self.__m2.table_name}{primary_join_index}'
+                     f'{annotate_join_index}',
+            'on': f'joint_table{primary_join_index}'
+                  f'{annotate_join_index}.{self.__m2.__name__.lower()}_id = '
+                  f'{self.__m2.table_name}'
+                  f'{primary_join_index}'
+                  f'{annotate_join_index}.id',
             'field': field
         }
 

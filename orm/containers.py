@@ -1,7 +1,6 @@
 from mysql.connector import connect, Error
 from settings import db_data
-from . import fields as fld, model as mdl, query as qr
-from .aggregate import BasicAggregate
+from . import fields as fld, model as mdl, query as qr, aggregate as aggr
 
 
 class QuerySet:
@@ -50,10 +49,17 @@ class QuerySet:
         def delete(self) -> None:
             self.__query_set.delete()
 
-    def __init__(self, model, query):
-        self.__model = model
-        self.__query = query
-        self.__query['order_by'] = []
+    def __init__(self, model, *args, **kwargs):
+        self.__model = model  # Model class allowing to gain access to fields list, table name, etc.
+        self.__query = {
+            'args': args,
+            'kwargs': kwargs,
+            'order_by': [],
+            'annotate': {
+                'args': (),
+                'kwargs': {}
+            }
+        }
         self.__union = []
         self.__executed = False
         self.__container = ()
@@ -144,7 +150,7 @@ class QuerySet:
                                 f"""SELECT EXISTS({assembled[:index] 
                                 if index > 0 else assembled} INNER JOIN {
                                 self.__model.table_name} AS intersect ON {
-                                self.__model.table_name}0.id = intersect.id {
+                                self.__model.table_name}00.id = intersect.id {
                                 assembled[index:] + f' AND intersect.id = {item.id}'
                                 if index > 0 else f' WHERE intersect.id = {item.id}'
                                 })"""
@@ -204,32 +210,49 @@ class QuerySet:
         ),)
         return self
 
-    def aggregate(self, *args):  # SELECT Aggr(...), ... command
-        if len(args) > 0:  # Check if is enough arguments
-            if not all(map(lambda arg: issubclass(type(arg), BasicAggregate), args)):
-                raise TypeError(  # Check if arguments specified are Aggregate wrappers
-                    'Expected BasicAggregate subclass '
-                    'instances as args values for aggregate() method.'
+    @staticmethod
+    def __validate_aggregate(*args, **kwargs):  # Used by aggregate() and annotate() methods
+        if len(args) + len(kwargs) > 0:  # Check if is enough arguments
+            if not all(map(lambda arg: issubclass(  # Arguments type check
+                    type(arg), aggr.BaseAggregate  # Single aggregate function
+            ) or isinstance(
+                arg, aggr.AggregateOperationWrapper  # Operation with multiple aggregate functions
+            ), args + tuple(kwargs.values()))):
+                raise TypeError(  # Check if arguments specified are aggregate wrappers
+                    'Expected BasicAggregate subclass or AggregateOperationWrapper '
+                    'class instances as args values for aggregate() method.'
                 )
-            try:  # SELECT command
-                with connect(**db_data) as connection:
-                    with connection.cursor(dictionary=True) as cursor:
-                        cursor.execute(
-                            qr.assemble_query(
-                                model=self.__model,
-                                query=self.__query,
-                                aggregate_fields=args
-                            )
-                        )
-                        result = cursor.fetchall()
-                        return result
-            except Error as err:
-                print(err)
         else:
             raise ValueError(
                 'At least one argument '
                 'required for aggregate() method.'
             )
+
+    def aggregate(self, *args, **kwargs):  # SELECT Aggr(...) as alias, ... command
+        QuerySet.__validate_aggregate(*args, **kwargs)
+        try:  # SELECT command
+            with connect(**db_data) as connection:
+                with connection.cursor(dictionary=True) as cursor:
+                    cursor.execute(
+                        qr.assemble_query(
+                            model=self.__model,
+                            query=self.__query,
+                            aggregate_fields={
+                                'args': args,  # Auto alias expressions
+                                'kwargs': kwargs  # Alias-specified expressions
+                            }
+                        )
+                    )
+                    result = cursor.fetchall()
+                    return result
+        except Error as err:
+            print(err)
+
+    def annotate(self, *args, **kwargs):  # SELECT ..., (SELECT Aggr(...) ...) as alias, ... command
+        QuerySet.__validate_aggregate(*args, **kwargs)
+        self.__query['annotate']['args'] += args
+        self.__query['annotate']['kwargs'].update(kwargs)
+        return self
 
     def update(self, **kwargs) -> None:  # Updating all the QuerySet members according to the kwargs given
         self.__model.check_table()
@@ -238,7 +261,10 @@ class QuerySet:
             if not name in self.__model.fields:  # Checking if all fields specified right
                 raise Exception('Wrong fields specified in update method')
             else:
-                update_set.append(f'{self.__model.table_name}.{name} = {self.__model.fields[name].to_sql(val)}')
+                update_set.append(
+                    f'{self.__model.table_name}.{name} = '
+                    f'{self.__model.fields[name].to_sql(val)}'
+                )
                 for mi in self.__container:
                     setattr(mi, name, val)
         try:  # UPDATE command
@@ -263,7 +289,7 @@ class QuerySet:
                     cursor.execute(
                         f"""DELETE FROM {self.__model.table_name} WHERE {
                         self.__model.table_name}.id IN (SELECT {
-                        self.__model.table_name}0.id FROM ({
+                        self.__model.table_name}00.id FROM ({
                         qr.assemble_query(
                             model=self.__model,
                             query=self.__query,
@@ -298,21 +324,10 @@ class QuerySet:
             return bool(self.__container)
 
     def order_by(self, *args):  # *args format: '(-)<field>__<subfield>__...__<subfield>'
-        for arg in args:
-            if isinstance(arg, str):
-                subfs = arg.split('__')
-                if subfs[0].replace('-', '') in self.__model.fields:
-                    pass
-                else:  # Check if model has field listed
-                    raise AttributeError(
-                        f'Model {self.__model.__name__} does'
-                        f' not have field named {subfs[0]}'
-                    )
-            else:  # Check if all order_by parameters are strings
-                raise TypeError(
-                    f'Wrong argument type for order_by() method:'
-                    f' expected str but got {type(arg).__name__}'
-                )
+        if not all(map(lambda arg: isinstance(arg, str), args)):
+            raise TypeError(
+                f'Got wrong argument type for order_by() method.'
+            )
         self.__query['order_by'].extend(args)
         return self
 
@@ -337,8 +352,9 @@ class QuerySet:
         else:
             self.__executed = False
             self.__container = ()
-            return QuerySet(self.__model, {
-                'args': qr.Q.Or(
+            return QuerySet(
+                self.__model,
+                qr.Q.Or(
                     qr.Q.And(*(self.__query['args'] + tuple(
                         qr.Q(**{name: value})
                         for name, value in self.__query['kwargs'].items()
@@ -347,9 +363,8 @@ class QuerySet:
                         qr.Q(**{name: value})
                         for name, value in other.__query['kwargs'].items()
                     )))
-                ),
-                'kwargs': {}
-            })
+                )
+            )
 
     def __ror__(self, other):
         return self.__or__(other)
@@ -361,10 +376,11 @@ class QuerySet:
             self.__executed = False
             self.__container = ()
             self.__query['kwargs'].update(other.__query['kwargs'])
-            return QuerySet(self.__model, {
-                'args': self.__query['args'] + other.__query['args'],
-                'kwargs': self.__query['kwargs']
-            })
+            return QuerySet(
+                self.__model,
+                *(self.__query['args'] + other.__query['args']),
+                **self.__query['kwargs']
+            )
 
     def __rand__(self, other):
         return self.__and__(other)

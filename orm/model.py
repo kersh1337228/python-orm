@@ -196,7 +196,7 @@ class Model:
     @classmethod
     def filter(cls, *args, **kwargs):  # Returns QuerySet of model instances matching query
         cls.check_table()
-        return cont.QuerySet(cls, {'args': args, 'kwargs': kwargs})
+        return cont.QuerySet(cls, *args, **kwargs)
 
     @classmethod
     def get(cls, *args, **kwargs):
@@ -206,13 +206,17 @@ class Model:
         except IndexError:  # ... or None if nothing was found
             return None
 
-    @classmethod
-    def order_by(cls, *args):  # *args format: '(-)<field>__<subfield>__...__<subfield>'
+    @classmethod  # Returns query set ordered in given way
+    def order_by(cls, *args):  # *args format: "(-)<field>__<subfield>__...__<subfield>"
         return cls.filter().order_by(*args)
 
-    @classmethod
-    def aggregate(cls, *args):  # *args format Aggr('<field>__<subfield>__...__<subfield>')
-        return cls.filter().aggregate(*args)
+    @classmethod  # Makes SELECT query with aggregate functions
+    def aggregate(cls, *args, **kwargs):
+        return cls.filter().aggregate(*args, **kwargs)
+
+    @classmethod  # Returns QuerySet where each ModelInstance has additional fields annotated
+    def annotate(cls, *args, **kwargs):
+        return cls.filter().annotate(*args, **kwargs)
 
     @classmethod  # Drops database table associated with model
     def drop(cls):
