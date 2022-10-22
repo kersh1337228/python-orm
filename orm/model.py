@@ -1,26 +1,67 @@
-from mysql.connector import connect, Error
 from settings import db_data
-from functools import reduce
 from . import fields as fld, query as qr, containers as cont
+from mysql.connector import connect, Error
+import re
 
 
 class ModelInstance:  # Model wrapper class to restrict access to Model class fields and methods
-    def __init__(self, model, **kwargs):
-        fields = model.fields
-        for name, value in kwargs.items():  # Initializing all fields as class attributes
+    def __init__(
+            self,
+            model,
+            related_fields: list[str]=None,
+            prefetched_fields: dict=None,
+            **kwargs
+    ):
+        self.__cache = {}  # Cache to store nested model fields data
+        # Ejecting related model data from kwargs given (Foreign Key)
+        if related_fields:
+            for field in related_fields:  # Nested model field (ForeignKey)
+                fnames = field.split('__')  # Splitting to get subfields sequence
+                current_model = model
+                for fname in fnames:  # Getting proper nested model
+                    try:
+                        attr = getattr(current_model, fname)
+                        current_model = attr.ref
+                    except AttributeError:
+                        break
+                self.__cache[field] = ModelInstance(
+                    current_model,
+                    **{
+                        key.replace(f'{field}__', ''): kwargs.pop(key)
+                        for key in tuple(kwargs.keys())
+                        if re.search(f'^{field}__([a-z]+_?)+$', key)
+                    }
+                )
+        if prefetched_fields:
+            self.__cache.update(prefetched_fields)
+        # Initializing all given fields as class attributes
+        for name, value in kwargs.items():
             try:
                 attr = getattr(model, name)
                 setattr(self, name, attr.from_sql(value))
             except AttributeError:
                 setattr(self, name, value)
-        self.__model = model
-        for name, value in fields.items():  # Initializing m2m fields as ManyToManyFieldInstance wrappers
+        self.__model, fields = model, model.fields
+        # Initializing related models fields as field wrappers
+        for name, value in fields.items():
             if isinstance(value, fld.ManyToManyField):
                 fields[name].m1 = model
                 setattr(
-                    self, name,
-                    fld.ManyToManyFieldInstance(
-                        fields[name], self.id
+                    self, name, fld.ManyToManyFieldInstance(
+                        fields[name], self.id, dict(filter(
+                            lambda f: name in f[0],
+                            self.__cache.items()
+                        ))
+                    )
+                )
+            elif isinstance(value, fld.ForeignKey):
+                setattr(
+                    self, name, fld.ForeignKeyInstance(
+                        fields[name], getattr(self, name),
+                        dict(filter(
+                            lambda f: name in f[0],
+                            self.__cache.items()
+                        ))
                     )
                 )
 
@@ -217,6 +258,14 @@ class Model:
     @classmethod  # Returns QuerySet where each ModelInstance has additional fields annotated
     def annotate(cls, *args, **kwargs):
         return cls.filter().annotate(*args, **kwargs)
+
+    @classmethod  # Early query execution for ForeignKey fields
+    def select_related(cls, *args):
+        return cls.filter().select_related(*args)
+
+    @classmethod  # Early query execution for ManyToMany fields
+    def prefetch_related(cls, *args):
+        return cls.filter().prefetch_related(*args)
 
     @classmethod  # Drops database table associated with model
     def drop(cls):

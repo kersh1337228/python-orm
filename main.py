@@ -7,15 +7,9 @@ from orm.aggregate import *
 
 
 if __name__ == '__main__':
-    s = time.perf_counter()
-    a = list(Order.filter(
-        ticket__flight__routes__plane__name__istartswith='airbus'
-    ).annotate(
-        price_formula=Max('ticket__flight__economy_price') //
-                      Min('ticket__flight__economy_price') -
-                      Avg('ticket__flight__economy_price') *
-                      Sum('ticket__flight__economy_price')
-    ).order_by(
-        '-price_formula'
-    ))
-    print(time.perf_counter() - s)
+    # s = time.perf_counter()
+    # o = list(Order.prefetch_related('ticket__flight__routes'))
+    o = Order.prefetch_related('ticket__flight__routes__plane').get(id=7)
+    t = o.ticket.flight.routes[0]
+    pass
+    # print(time.perf_counter() - s)

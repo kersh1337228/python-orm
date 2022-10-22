@@ -162,7 +162,7 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             joins, constraints, primary_join_index = Q.make_query(
                 model, primary_join_index, annotate_join_index  **self.query
             )
-            constraints = 'NOT (' + assembled['constraints'] + ')'
+            constraints = 'NOT (' + constraints + ')'
             return joins, constraints, primary_join_index
 
     @staticmethod  # Create SQL-query string from keyword one
@@ -201,7 +201,7 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             primary_join_index: int,
             annotate_join_index: int,
             *args
-    ) -> tuple[list, list, int, int]:
+    ) -> tuple[list, list, int]:
         joins, fields = [], []
         for query in args:
             fnames = query.replace('-', '').split('__')  # "-" -> DESC / "" -> ASC
@@ -223,8 +223,8 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             primary_join_index: int,
             annotate_join_index: int,
             *args: tuple[aggr.BaseAggregate | aggr.AggregateOperationWrapper],
-            **kwargs
-    ) -> tuple[list, list, list]:
+            **kwargs: dict[str, aggr.BaseAggregate | aggr.AggregateOperationWrapper]
+    ) -> tuple[list, list, list, int, int]:
         joins, fields, aliases = [], [], []
         for aggregate in args:
             annotate_join_index += 1
@@ -244,13 +244,35 @@ class Q(BaseOperation):  # Query class to add more complex constraints like AND,
             aliases.append(alias)  # Using aliases given
         return joins, fields, aliases, primary_join_index, annotate_join_index
 
+    @staticmethod
+    def make_related_fields(
+            model: object,
+            primary_join_index: int,
+            annotate_join_index: int,
+            *args: tuple[str],
+    ) -> tuple[list, list, int]:
+        joins, fields = [], []
+        for field in args:
+            fnames = field.split('__')
+            ajoins, current_model, primary_join_index = Q.make_joins(
+                model, fnames, primary_join_index, annotate_join_index
+            )
+            joins.extend(ajoins)  # Extending joins for nested fields
+            fields.append(', '.join(
+                f'{joins[-1]["alias"]}.{fname} AS {field}__{fname}'
+                for fname, fval in
+                current_model.fields.items()
+                if not isinstance(fval, fld.ManyToManyField)
+            ))
+        return joins, fields, primary_join_index
+
     @staticmethod  # Table joins for nested fields
     def make_joins(
             model: object,
             fnames: list[str],
             primary_join_index: int,
             annotate_join_index: int
-    ) -> tuple[tuple, object]:
+    ) -> tuple[tuple, object, int]:
         current_model, joins = model, ()
         for field in fnames:  # Using joins to specify subfield constraints
             try:  # Adding joins for ForeignKey and ManyToManyField
@@ -324,12 +346,12 @@ def assemble_query(  # Making SQL query-string for given model with given parame
         model,  # Allows to gain access to model resources
         query: dict,  # Dictionary storing query parameters
         fields: tuple[str]=None,  # Non-aggregate fields list to select (optional)
-        aggregate_fields: dict[str, tuple, dict]={'args': (), 'kwargs': {}},  # Aggregate fields list to select (optional)
+        aggregate_fields: dict[str, tuple | dict]=None,  # Aggregate fields list to select (optional)
         validate_fields: bool=True  # Works only if fields argument specified (optional)
 ) -> str:
     # Initialising storages for JOIN, WHERE and ORDER BY
     joins, constraints, order_by = [], [], ''
-    primary_join_index, annotate_join_index = 0, 0
+    primary_join_index, annotate_join_index = 1, 0
     # Assembling WHERE query
     for arg in query['args']:  # Q-class queries (Q, Q.Not, Q.Or, Q.And)
         ajoins, aconstraints, primary_join_index = arg.assemble_query(
@@ -355,7 +377,7 @@ def assemble_query(  # Making SQL query-string for given model with given parame
             flist = ', '.join(f'{model.table_name}00.{f}' for f in fields)
         else:  # No validation - SQL errors could be raised
             flist = ', '.join(fields)
-    elif aggregate_fields['args'] or aggregate_fields['kwargs']:  # Fields wrapped in aggregate functions
+    elif aggregate_fields and (aggregate_fields['args'] or aggregate_fields['kwargs']):  # Fields wrapped in aggregate functions
         ajoins, afields, aaliases, primary_join_index, annotate_join_index = Q.make_aggregate(
             model, primary_join_index, annotate_join_index,
             *aggregate_fields['args'], **aggregate_fields['kwargs']
@@ -368,6 +390,16 @@ def assemble_query(  # Making SQL query-string for given model with given parame
             )
         )
     else:  # All primary model fields available (except ManyToManyField) + annotated fields if specified
+        # Related models fields
+        related_flist = ''  # Doing variable assign not to get error if no related fields were specified
+        if query['select_related']:  # Appending related fields
+            ajoins, afields, primary_join_index = Q.make_related_fields(
+                model, primary_join_index,
+                annotate_join_index, *query['select_related']
+            )
+            joins.extend(ajoins)
+            related_flist = ', '.join(afields)
+        # Annotated fields
         annotated_flist = ''  # Doing variable assign not to get error if no annotate was specified
         if query['annotate']['args'] or query['annotate']['kwargs']:  # Appending annotated fields
             ajoins, afields, aaliases, primary_join_index, annotate_join_index = Q.make_aggregate(
@@ -383,12 +415,17 @@ def assemble_query(  # Making SQL query-string for given model with given parame
                     afields, aaliases
                 )
             )
-        flist = ', '.join(  # Primary model fields + annotated fields
+        # Primary model fields
+        flist = ', '.join(  # Primary model fields
             f'{model.table_name}00.{fname}'
             for fname, fval in
             model.fields.items()
             if not isinstance(fval, fld.ManyToManyField)
-        ) + (f', {annotated_flist}' if annotated_flist else '')
+        ) + (  # Related fields
+            f', {related_flist}' if related_flist else ''
+        ) + (  # Annotated fields
+            f', {annotated_flist}' if annotated_flist else ''
+        )
     # Assembling ORDER BY query
     if query.get('order_by', None) and not fields:  # Specifying ORDER BY fields if listed
         ajoins, afields, primary_join_index = Q.make_order_by(

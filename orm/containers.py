@@ -1,6 +1,8 @@
+import mysql.connector.cursor
 from mysql.connector import connect, Error
 from settings import db_data
 from . import fields as fld, model as mdl, query as qr, aggregate as aggr
+import re
 
 
 class QuerySet:
@@ -49,20 +51,22 @@ class QuerySet:
         def delete(self) -> None:
             self.__query_set.delete()
 
-    def __init__(self, model, *args, **kwargs):
-        self.__model = model  # Model class allowing to gain access to fields list, table name, etc.
+    def __init__(self, model, container: tuple=(), *args, **kwargs):
+        self.__model = model  # Inner model class allowing to gain access to fields list, table name, etc.
         self.__query = {
-            'args': args,
-            'kwargs': kwargs,
-            'order_by': [],
-            'annotate': {
-                'args': (),
-                'kwargs': {}
-            }
+            'args': args,  # Q class query aka Q, Q.Not, Q.And, Q.Or
+            'kwargs': kwargs,  # Keyword query
+            'order_by': [],  # Fields list for ORDER BY command
+            'annotate': {  # Annotated fields list
+                'args': (),  # Automatically aliased annotations
+                'kwargs': {}  # Manually aliased annotations
+            },
+            'select_related': [],  # ForeignKey fields list for early select
+            'prefetch_related': [],  # ManyToMany fields list for early select
         }
-        self.__union = []
-        self.__executed = False
-        self.__container = ()
+        self.__union = []  # Storage for QuerySets to be united aka UNION command
+        self.__executed = False  # Inner query execution indicator
+        self.__container = container  # Query selected data storage
 
     def __exec(self) -> None:  # Lazy query execution
         self.__model.check_table()  # Check if necessary table exists
@@ -77,7 +81,12 @@ class QuerySet:
                     )
                     results = cursor.fetchall()
                     self.__container = tuple(
-                        mdl.ModelInstance(self.__model, **res) for res in results
+                        mdl.ModelInstance(
+                            self.__model,
+                            self.__query['select_related'],
+                            self.__prefetch(cursor),
+                            **res
+                        ) for res in results
                     )
                     self.__executed = True
         except Error as err:
@@ -125,7 +134,7 @@ class QuerySet:
                 'only int and slice argument types.'
             )
 
-    def __contains__(self, item):
+    def __contains__(self, item) -> bool:
         if not issubclass(type(item), mdl.ModelInstance):
             raise TypeError('QuerySet object can only store model instances.')
         elif item.model.__name__ != self.__model.__name__:
@@ -144,8 +153,8 @@ class QuerySet:
                                 query=self.__query,
                                 fields=('*',),
                                 validate_fields=False
-                            )
-                            index = assembled.find('WHERE')  # Splitting by WHERE keyword to insert additional INNER JOIN
+                            )  # Splitting by WHERE keyword to insert additional INNER JOIN
+                            index = assembled.find('WHERE')
                             cursor.execute(
                                 f"""SELECT EXISTS({assembled[:index] 
                                 if index > 0 else assembled} INNER JOIN {
@@ -168,7 +177,7 @@ class QuerySet:
         else:
             return f'<QuerySet{self.__container}>'
 
-    def __len__(self):
+    def __len__(self) -> int:
         if not self.__executed:
             self.__model.check_table()
             try:  # SELECT COUNT command
@@ -196,7 +205,7 @@ class QuerySet:
         self.__query['kwargs'].update(kwargs)
         return self
 
-    def get(self, *args, **kwargs): # SELECT WHERE ... LIMIT 1
+    def get(self, *args, **kwargs):  # SELECT WHERE ... LIMIT 1
         try:  # Returns model instance matching query...
             return self.filter(*args, **kwargs)[0]
         except IndexError:  # ... or None if nothing was found
@@ -208,6 +217,14 @@ class QuerySet:
         self.__query['args'] += (~qr.Q.And(
             *(args + tuple(qr.Q(**{name: val}) for name, val in kwargs.items()))
         ),)
+        return self
+
+    def order_by(self, *args):  # *args format: '(-)<field>__<subfield>__...__<subfield>'
+        if not all(map(lambda arg: isinstance(arg, str), args)):
+            raise TypeError(
+                f'Got wrong argument type for order_by() method.'
+            )
+        self.__query['order_by'].extend(args)
         return self
 
     @staticmethod
@@ -254,11 +271,92 @@ class QuerySet:
         self.__query['annotate']['kwargs'].update(kwargs)
         return self
 
+    def __validate_related(
+            self,
+            method_name: str,
+            types_allowed: tuple[type],
+            *args
+    ):
+        if len(args) > 0:
+            if not all(
+                map(lambda arg: isinstance(arg, str) and
+                arg.split('__')[0] in self.__model.fields, args)
+            ):
+                raise ValueError(
+                    'Wrong arguments format for '
+                    f'{method_name}_related() method.'
+                )
+            for arg in args:
+                current_model, fnames = self.__model, arg.split('__')
+                for fname in fnames:  # Getting proper nested model
+                    try:
+                        attr = getattr(current_model, fname)
+                        current_model = attr.ref
+                        if not isinstance(attr, types_allowed):
+                            raise TypeError(
+                                f'Wrong type found in {method_name}_related() method argument. '
+                                f'Expected {" or ".join(t.__name__ for t in types_allowed)} '
+                                f'but got {type(attr).__name__}.'
+                            )
+                    except AttributeError:
+                        break
+        else:
+            raise ValueError(
+                'At least one argument required '
+                f'by {method_name}_related() method.'
+            )
+
+    def select_related(self, *args):  # SELECT with ForeignKey fields
+        self.__validate_related('select', (fld.ForeignKey,), *args)
+        self.__query['select_related'].extend(args)
+        return self
+
+    def __prefetch(self, cursor: mysql.connector.cursor.MySQLCursor) -> tuple[list[dict], dict]:  # Separating ManyToMany fields from others
+        prefetched = {}
+        if self.__query['prefetch_related']:
+            joins, fields, _ = qr.Q.make_related_fields(
+                self.__model, 0, 0, *self.__query['prefetch_related']
+            )
+            cursor.execute(
+                f"""SELECT {', '.join(fields)} FROM {self.__model.table_name} AS {
+                self.__model.table_name}00{''.join(
+                    f" {j['type']} JOIN {j['table']} AS {j['alias']} ON {j['on']}"
+                    for j in joins
+                )}"""
+            )
+            rows = cursor.fetchall()
+            # Separating M2M data for each row fetched
+            for pfield in self.__query['prefetch_related']:
+                fnames = pfield.split('__')  # Splitting to get subfields sequence
+                current_model = self.__model
+                for fname in fnames:  # Getting proper nested model
+                    try:
+                        attr = getattr(current_model, fname)
+                        current_model = attr.ref
+                    except AttributeError:
+                        break
+                prefetched[pfield] = tuple(
+                    mdl.ModelInstance(
+                        current_model,
+                        **{
+                            key.replace(f'{pfield}__', ''): row.pop(key)
+                            for key in tuple(row.keys())
+                            if re.search(f'^{pfield}__([a-z]+_?)+$', key)
+                        }
+                    ) for row in rows
+                )
+        return prefetched
+
+    def prefetch_related(self, *args):  # SELECT with ManyToMany fields
+        self.__validate_related('prefetch', (fld.ForeignKey, fld.ManyToManyField), *args)
+        self.__query['prefetch_related'].extend(args)
+        return self
+
     def update(self, **kwargs) -> None:  # Updating all the QuerySet members according to the kwargs given
         self.__model.check_table()
         update_set = []
         for name, val in kwargs.items():
-            if not name in self.__model.fields:  # Checking if all fields specified right
+            if name not in self.__model.fields:  # Checking if all fields specified right
                 raise Exception('Wrong fields specified in update method')
             else:
                 update_set.append(
@@ -322,14 +420,6 @@ class QuerySet:
                 print(err)
         else:
             return bool(self.__container)
-
-    def order_by(self, *args):  # *args format: '(-)<field>__<subfield>__...__<subfield>'
-        if not all(map(lambda arg: isinstance(arg, str), args)):
-            raise TypeError(
-                f'Got wrong argument type for order_by() method.'
-            )
-        self.__query['order_by'].extend(args)
-        return self
 
     def __bool__(self):
         return self.exists()

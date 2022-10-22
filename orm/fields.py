@@ -301,8 +301,8 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
         else:
             return str(value.id)
 
-    def from_sql(self, value: str):
-        return ForeignKeyInstance(self, value)
+    def from_sql(self, value: int):
+        return value
 
     def sql_init(self, name: str):
         return IntField.sql_init(self, name) + f""", FOREIGN KEY ({name
@@ -326,31 +326,6 @@ class ForeignKey(IntField, LinkField):  # Field to link models via many-to-one r
                   f'{annotate_join_index}.id',
             'field': field
         },
-
-
-class ForeignKeyInstance:  # Wrapper to work with ForeignKey field using model instance
-    def __init__(self, fk: ForeignKey, id: int):
-        self.__fk = fk
-        self.__id = id
-        self.__ref = None
-
-    def __getattr__(self, item):  # Nested model fields access
-        if not self.__ref:  # Make lazy database select
-            self.__ref = self.__fk.ref.get(id=self.__id)
-        return getattr(self.__ref, item)
-
-    def __setattr__(self, key, value):
-        if key in (  # Attributes used inside class
-                '_ForeignKeyInstance__fk',
-                '_ForeignKeyInstance__id',
-                '_ForeignKeyInstance__ref'
-        ):
-            super().__setattr__(key, value)
-        else:  # No attribute assign from out of class
-            raise AttributeError(
-                'ForeignKey field nested '
-                'model could not be altered.'
-            )
 
 
 class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-many relationships aka SQL TABLE m1_m2
@@ -471,11 +446,60 @@ class ManyToManyField(IntField, LinkField):  # Field to link models via many-to-
             print(err)
 
 
-class ManyToManyFieldInstance:  # Wrapper to work with M2M field using model instance
-    def __init__(self, m2m: ManyToManyField, m1_id: int):
+class LinkFieldInstance:  # Field instance lazy wrapper for nested models fields
+    def __init__(self, cache: dict=None):
+        self._cache = cache if cache else {}
+
+
+class ForeignKeyInstance(LinkFieldInstance):  # Wrapper to work with ForeignKey field using model instance
+    def __init__(self, fk: ForeignKey, id: int, cache: dict=None):
+        self.__fk = fk
+        self.__id = id
+        self.__ref = cache.get(
+            self.__fk.ref.__name__.lower(), None
+        ) if cache else None
+        super().__init__(cache)
+
+    def __getattr__(self, item):
+        if not self.__ref:  # Make lazy database select
+            self.__ref = self.__fk.ref.get(id=self.__id)
+        # Dragging cache inside nested models fields
+        for name, val in self._cache.items():
+            getattr(  # Getting nested model field by name
+                self.__ref, name.split('__')[1]
+            )._cache.update(  # Direct cache update
+                {'__'.join(name.split('__')[1:]): val}
+            )
+        return getattr(self.__ref, item)
+
+
+class ManyToManyFieldInstance(LinkFieldInstance):  # Wrapper to work with M2M field using model instance
+    def __init__(self, m2m: ManyToManyField, m1_id: int, cache: dict=None):
         self.__m2m = m2m
         self.__m1_id = m1_id
-        self.__refs = m2m.select(m1_id)
+        self.__refs = cont.QuerySet(self.__m2m.ref, cache.get(
+            self.__m2m.ref.__name__.lower(), None
+        )) if cache else m2m.select(m1_id)
+        super().__init__(cache)
+
+    def __data_access(self):
+        for el in self.__refs:
+            # Dragging cache inside nested models fields
+            for name, val in self._cache.items():
+                fnames = name.split('__')[1:]
+                attr = el
+                for fname in fnames:  # Getting proper nested model
+                    try:
+                        attr = getattr(attr, fname)
+                    except AttributeError:
+                        break
+                getattr(  # Getting nested model field by name
+                    el, name.split('__')[1]
+                )._cache.update(  # Direct cache update
+                    {'__'.join(name.split('__')[1:]): next(filter(
+                        lambda x: x.id == attr.id, val
+                    ))}
+                )
 
     def append(self, ref):  # Appending model instance to model's m2m
         if not issubclass(type(ref), mdl.ModelInstance):
@@ -508,10 +532,14 @@ class ManyToManyFieldInstance:  # Wrapper to work with M2M field using model ins
         return self.__refs.exclude(*args, **kwargs)
 
     def __iter__(self):
-        return self.__refs.__iter__()
+        result = self.__refs.__iter__()
+        self.__data_access()
+        return result
 
     def __getitem__(self, key: int | slice):
-        return self.__refs.__getitem__(key)
+        result = self.__refs.__getitem__(key)
+        self.__data_access()
+        return result
 
     def __contains__(self, item):
         return self.__refs.__contains__(item)
