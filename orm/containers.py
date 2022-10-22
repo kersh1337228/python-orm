@@ -5,11 +5,15 @@ from . import fields as fld, model as mdl, query as qr, aggregate as aggr
 import re
 
 
+# Container for queries and Model instances selected. Core of ORM API.
+# Wraps query parameters and model to perform further lazy select.
+# Select only occurs after direct data access attempt.
 class QuerySet:
+    # Custom iterator wrapping QuerySet container (lazy).
     class __QuerySetIterator:
         def __init__(self, container):
             self.__container = container
-            self.__index = -1
+            self.__index = -1  # Current iteration index
 
         def __iter__(self):
             return self
@@ -21,17 +25,18 @@ class QuerySet:
             except IndexError:
                 raise StopIteration
 
-    class __QuerySetSlice:  # QuerySet wrapper object to hide methods that cannot be converted into SQL
+    # QuerySet wrapper object to hide methods that
+    # cannot be converted into SQL due to slice (non-lazy).
+    class __QuerySetSlice:
         def __init__(self, query_set):
             self.__query_set = query_set
 
         def __iter__(self):
             return self.__query_set.__iter__()
 
-        def __getitem__(self, key: int | slice):
-            if isinstance(key, (int, slice)):
-                if not self.__query_set._QuerySet__executed:
-                    self.__query_set._QuerySet__exec()
+        def __getitem__(self, key: int | slice):  # Item access causes query instantaneous execution
+            if isinstance(key, (int, slice)):  # Only slice and int indexes are allowed
+                self.__query_set.execute()
                 return self.__query_set[key]
             else:
                 raise TypeError(
@@ -45,13 +50,13 @@ class QuerySet:
         def __len__(self):
             return self.__query_set.__len__()
 
-        def update(self, **kwargs) -> None:
+        def update(self, **kwargs) -> None:  # Updates elements matching query
             self.__query_set.update(**kwargs)
 
-        def delete(self) -> None:
+        def delete(self) -> None:  # Deletes elements matching query
             self.__query_set.delete()
 
-    def __init__(self, model, container: tuple=(), *args, **kwargs):
+    def __init__(self, model, container: tuple = (), *args, **kwargs):
         self.__model = model  # Inner model class allowing to gain access to fields list, table name, etc.
         self.__query = {
             'args': args,  # Q class query aka Q, Q.Not, Q.And, Q.Or
@@ -74,102 +79,79 @@ class QuerySet:
             with connect(**db_data) as connection:
                 with connection.cursor(dictionary=True) as cursor:
                     cursor.execute(
-                        ' UNION '.join(
+                        ' UNION '.join(  # Custom query assembly and execution
                             qr.assemble_query(self.__model, q)
                             for q in [self.__query] + self.__union
-                        )
-                    )
+                        )  # Fetching results first not to lose if
+                    )      # another query executes inside __prefetch() method
                     results = cursor.fetchall()
-                    self.__container = tuple(
+                    self.__container = tuple(  # Filling inner container with model instances
                         mdl.ModelInstance(
-                            self.__model,
-                            self.__query['select_related'],
-                            self.__prefetch(cursor),
-                            **res
+                            self.__model,  # Model template
+                            self.__query['select_related'],  # select_related() fields (ForeignKey)
+                            self.__prefetch(cursor),  # prefetch_related() fields (ManyToManyField)
+                            **res  # Rows fetched
                         ) for res in results
-                    )
+                    )  # Toggling execution indicator
                     self.__executed = True
         except Error as err:
             print(err)
 
     def __iter__(self) -> __QuerySetIterator:
-        if not self.__executed:
+        if not self.__executed:  # Iterating requires direct data access
             self.__exec()
         return QuerySet.__QuerySetIterator(self.__container)
 
-    def __getitem__(self, key: int | slice):
-        if isinstance(key, int):
-            if key < 0:
-                if not self.__executed:
-                    self.__exec()
-                return self.__container[key]
-            else:
+    def __getitem__(self, key: int | slice):  # Slice and int index selection
+        if isinstance(key, int):  # ModelInstance select
+            if key < 0:  # Reverse order and ordinary select
+                self.__query['order_by'].insert(0, '-id')
+                return self.__getitem__(-key)
+            else:  # Ordinary select
                 self.__query['offset'] = key
                 self.__query['limit'] = 1
                 self.__exec()
                 return self.__container[0]
-        elif isinstance(key, slice):
+        elif isinstance(key, slice):  # QuerySet or QuerySetSlice select
             if not self.__executed:  # If container is empty then altering query
-                if not key.start and not key.stop and key.step == -1:
-                    self.__query['order_by'].append('-id')
+                if not key.start and not key.stop and key.step == -1:  # Simply reversing order
+                    self.__query['order_by'].insert(0, '-id')
                     return self
                 elif key.start and key.stop and 0 <= key.start < key.stop:
                     match key.start, key.stop:
-                        case start, None:
+                        case start, None:  # Start only specified -> OFFSET <start>
                             self.__query['offset'] = start
-                        case None, stop:
+                        case None, stop:  # Stop only specified -> LIMIT <stop>
                             self.__query['limit'] = stop
-                        case start, stop:
+                        case start, stop:  # Both start and stop specified -> LIMIT <stop> OFFSET <start>
                             self.__query['offset'] = start
                             self.__query['limit'] = stop - start
                     return QuerySet.__QuerySetSlice(self)
-                else:  # If no SQL-convert found just making query
+                else:  # If no SQL-converting found just making query
                     self.__exec()
                     return self.__container[key]
-            else:
+            else:  # Direct access if already executed
                 return self.__container[key]
-        else:
+        else:  # Wrong ket format
             raise TypeError(
                 'QuerySet __getitem__() method supports '
                 'only int and slice argument types.'
             )
 
-    def __contains__(self, item) -> bool:
+    def __contains__(self, item) -> bool:  # Check if ModelInstance in QuerySet
         if not issubclass(type(item), mdl.ModelInstance):
-            raise TypeError('QuerySet object can only store model instances.')
-        elif item.model.__name__ != self.__model.__name__:
+            raise TypeError(
+                'QuerySet object can only store model instances.'
+            )
+        elif item.model.__name__ != self.__model.__name__:  # QuerySet is homogeneous
             raise TypeError(
                 f'''Wrong model for this QuerySet: expected "{
                 self.__model.__name__}" but got "{item.model.__name__}".'''
             )
         else:
             if not self.__executed:
-                self.__model.check_table()
-                try:  # SELECT EXISTS command with INNER JOIN
-                    with connect(**db_data) as connection:
-                        with connection.cursor() as cursor:
-                            assembled = qr.assemble_query(
-                                model=self.__model,
-                                query=self.__query,
-                                fields=('*',),
-                                validate_fields=False
-                            )  # Splitting by WHERE keyword to insert additional INNER JOIN
-                            index = assembled.find('WHERE')
-                            cursor.execute(
-                                f"""SELECT EXISTS({assembled[:index] 
-                                if index > 0 else assembled} INNER JOIN {
-                                self.__model.table_name} AS intersect ON {
-                                self.__model.table_name}00.id = intersect.id {
-                                assembled[index:] + f' AND intersect.id = {item.id}'
-                                if index > 0 else f' WHERE intersect.id = {item.id}'
-                                })"""
-                            )
-                            results = cursor.fetchall()
-                            return bool(results[0][0])
-                except Error as err:
-                    print(err)
-            else:
-                return item in self.__container
+                self.__exec()
+            return item.id in (el.id for el in self.__container)
 
     def __str__(self) -> str:
         if not self.__executed:
@@ -187,8 +169,10 @@ class QuerySet:
                             qr.assemble_query(
                                 model=self.__model,
                                 query=self.__query,
-                                fields=('COUNT(*)',),
-                                validate_fields=False
+                                aggregate_fields={
+                                    'args': (aggr.Count('id'),),
+                                    'kwargs': {}
+                                }
                             )
                         )
                         results = cursor.fetchall()
@@ -311,7 +295,10 @@ class QuerySet:
         self.__query['select_related'].extend(args)
         return self
 
-    def __prefetch(self, cursor: mysql.connector.cursor.MySQLCursor) -> tuple[list[dict], dict]:  # Separating ManyToMany fields from others
+    def __prefetch(
+            self,
+            cursor: mysql.connector.cursor.MySQLCursorBufferedDict
+    ) -> tuple[list[dict], dict]:  # Separating ManyToMany fields from others
         prefetched = {}
         if self.__query['prefetch_related']:
             joins, fields, _ = qr.Q.make_related_fields(
@@ -370,7 +357,7 @@ class QuerySet:
                 with connection.cursor(dictionary=True) as cursor:
                     cursor.execute(
                         f"""UPDATE {self.__model.table_name}, ({
-                        qr.assemble_query(self.__model, self.__query, ('id',))
+                        qr.assemble_query(self.__model, self.__query)
                         }) AS __tab SET {', '.join(
                             update_set
                         )} WHERE {self.__model.table_name}.id = __tab.id"""
@@ -390,10 +377,8 @@ class QuerySet:
                         self.__model.table_name}00.id FROM ({
                         qr.assemble_query(
                             model=self.__model,
-                            query=self.__query,
-                            fields=('*',),
-                            validate_fields=False
-                        )})"""
+                            query=self.__query
+                        )}) AS {self.__model.table_name}00)"""
                     )
                     connection.commit()
         except Error as err:
@@ -409,9 +394,7 @@ class QuerySet:
                             f"""SELECT EXISTS({
                             qr.assemble_query(
                                 model=self.__model,
-                                query=self.__query,
-                                fields=('*',),
-                                validate_fields=False
+                                query=self.__query
                             )})"""
                         )
                         results = cursor.fetchall()
@@ -420,6 +403,10 @@ class QuerySet:
                 print(err)
         else:
             return bool(self.__container)
+
+    def execute(self):  # Direct execution demand (mainly used by QuerySetSlice)
+        if not self.__executed:
+            self.__exec()
 
     def __bool__(self):
         return self.exists()
@@ -474,3 +461,65 @@ class QuerySet:
 
     def __rand__(self, other):
         return self.__and__(other)
+
+
+# Raw SQL-query wrapper.
+# Allows to directly execute SQL requests.
+class RawQuerySet:
+    def __init__(self, model, query: str):
+        self.__model = model
+        self.__query = query  # Raw SQL statement
+        self.__executed = False  # Execution indicator
+        self.__container = []  # Raw data selected storage
+        self.__validate_query()  # Validating query given using regular expression
+
+    def __validate_query(self):  # Validating query SQL syntax
+        if not re.fullmatch(
+            '^SELECT(( ALL| DISTINCT| DISTINCTROW)? [\w*().]+( AS \w+)?,?)+ '
+            f'FROM ({self.__model.table_name}( AS \w+)?)'
+            '(( LEFT| RIGHT| INNER| CROSS) JOIN \w+( AS \w+)? ON \w+\.\w+ = \w+\.\w+)*'
+            '( WHERE(( NOT)? \S+(\.\S+)? = [\S\']+(\.[\S\']+)?( AND| OR)?)+)?'
+            '( GROUP BY (\w+(\.\w+)?(, )?)+)?'
+            '( HAVING(( NOT)? \S+(\.\S+)? = [\S\']+(\.[\S\']+)?( AND| OR)?)+)?'
+            '( ORDER BY (\S+(\.\S+)?( ASC| DESC)?(, )?)+)?'
+            '( LIMIT \d+)?'
+            '( OFFSET \d+)?'
+            '( FOR (UPDATE|SHARE))?$',
+            self.__query.strip()
+        ):
+            raise ValueError(
+                'Query given does not match the '
+                'format required by RawQuerySet.'
+            )
+
+    def __exec(self):  # Executing query given
+        self.__model.check_table()  # Check if necessary table exists
+        try:  # SELECT command
+            with connect(**db_data) as connection:
+                with connection.cursor(dictionary=True) as cursor:
+                    cursor.execute(self.__query)
+                    self.__container = cursor.fetchall()  # Saving raw data fetched to container
+                    self.__executed = True
+        except Error as err:
+            print(err)
+
+    # RawQuerySet commands require execution before direct data access
+    def __getitem__(self, key: int | slice):
+        if not self.__executed:
+            self.__exec()
+        return self.__container[key]
+
+    def __iter__(self):
+        if not self.__executed:
+            self.__exec()
+        yield from self.__container
+
+    def __len__(self, item):
+        if not self.__executed:
+            self.__exec()
+        return len(self.__container)
+
+    def __bool__(self):
+        if not self.__executed:
+            self.__exec()
+        return bool(self.__container)

@@ -305,14 +305,6 @@ class Model:
         except Error as err:
             print(err)
 
-    @classmethod  # Simply executes query given
-    def sql_query(cls, query: str):
-        cls.check_table()
-        try:
-            with connect(**db_data) as connection:
-                with connection.cursor(dictionary=True) as cursor:
-                    cursor.execute(query.replace('%s', f'{cls.__name__}s'))
-                    results = cursor.fetchall()
-                    return results
-        except Error as err:
-            print(err)
+    @classmethod  # Wraps query given into RawQuerySet
+    def raw(cls, query: str):
+        return cont.RawQuerySet(cls, query)
